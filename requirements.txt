@@ -1,0 +1,15 @@
+
+pandas
+numpy
+scikit-learn
+joblib
+prometheus_client
+websockets
+termcolor
+streamlit
+pykalman
+matplotlib
+tqdm
+aiohttp
+xgboost
+swifter

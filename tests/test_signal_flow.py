@@ -1,0 +1,1 @@
+# Basic validation of input → signal → log

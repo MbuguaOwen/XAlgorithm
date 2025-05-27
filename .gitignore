@@ -1,0 +1,22 @@
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
+.env
+
+# System files
+.DS_Store
+
+# Logs
+logs/*
+!logs/signal_log.csv
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Temp
+*.log
+*.tmp
