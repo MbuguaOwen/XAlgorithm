@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# main.py – XAlgo: Asymmetric Conviction ML Arbitrage Engine (Strict Sells, Adaptive Buys)
+# main.py – XAlgo: Adaptive Asymmetric Conviction ML Arbitrage Engine (Manual Thresholds Only)
 
 import asyncio
 import logging
@@ -18,37 +18,46 @@ from core.execution_engine import calculate_dynamic_sl_tp
 from core.trade_logger import log_signal_event, log_execution_event
 from data.binance_ingestor import BinanceIngestor
 
-# === CONFIGURABLE ASYMMETRIC THRESHOLDS ===
-CLUSTER_SIZE_SELL = 17      # STRICT: Only act on SELL if you get 17 in a row
-CLUSTER_SIZE_BUY = 4        # ADAPTIVE: Only need 4 in a row to BUY
-
-CONVICTION_WEIGHT = 0.15
-COINT_WEIGHT = 0.5
-ZSCORE_WEIGHT = 0.5
-SLOPE_WEIGHT = 0.15
-
-MASTER_CONVICTION_THRESHOLD_SELL = 0.80
-MASTER_CONVICTION_THRESHOLD_BUY = 0.62
-
-MAX_HOLD_SECONDS = 1200
-MIN_SPREAD_MAGNITUDE = 0.00005
-USER_CONFIDENCE_THRESHOLD = None
-USER_COINTEGRATION_THRESHOLD = None
-
-GATE_MODEL_PATH = "ml_model/triangular_rf_model.json"
-PAIR_MODEL_PATH = "ml_model/pair_selector_model.json"
-COINT_MODEL_PATH = "ml_model/cointegration_score_model.json"
-REGIME_MODEL_PATH = "ml_model/regime_classifier.json"
+# === MANUAL CONFIGS: Enter your preferred values here ===
+BEST_CONFIGS = {
+    "bull": {
+        "base_cl_sell": 25, "cl_buy": 6, "conviction_weight": 0.20, "coint_weight": 0.55,
+        "zscore_weight": 0.45, "slope_weight": 0.20, "base_thr_sell": 0.92, "thr_buy": 0.72,
+        "min_spread": 0.00008, "sl_percent": 0.18, "tp_percent": 0.54
+    },
+    "bear": {
+        "base_cl_sell": 15, "cl_buy": 5, "conviction_weight": 0.16, "coint_weight": 0.51,
+        "zscore_weight": 0.41, "slope_weight": 0.17, "base_thr_sell": 0.88, "thr_buy": 0.68,
+        "min_spread": 0.00007, "sl_percent": 0.17, "tp_percent": 0.51
+    },
+    "flat": {
+        "base_cl_sell": 18, "cl_buy": 5, "conviction_weight": 0.18, "coint_weight": 0.53,
+        "zscore_weight": 0.43, "slope_weight": 0.19, "base_thr_sell": 0.90, "thr_buy": 0.70,
+        "min_spread": 0.000075, "sl_percent": 0.18, "tp_percent": 0.52
+    },
+    "neutral": {
+        "base_cl_sell": 17, "cl_buy": 4, "conviction_weight": 0.15, "coint_weight": 0.50,
+        "zscore_weight": 0.40, "slope_weight": 0.15, "base_thr_sell": 0.85, "thr_buy": 0.65,
+        "min_spread": 0.00006, "sl_percent": 0.16, "tp_percent": 0.48
+    }
+}
 
 reverse_pair_map = {0: "BTC", 1: "ETH"}
-regime_map = {0: "flat", 1: "volatile", 2: "trending"}
+regime_map = {0: "bull", 1: "bear", 2: "flat"}
 
 WINDOW = deque(maxlen=200)
 NAIROBI_TZ = pytz.timezone("Africa/Nairobi")
 
-# --- Cluster buffers per direction ---
-signal_cluster_buy = deque(maxlen=CLUSTER_SIZE_BUY)
-signal_cluster_sell = deque(maxlen=CLUSTER_SIZE_SELL)
+# --- Cluster buffers (set dynamically, accessible for backtest.py)
+signal_cluster_buy = deque(maxlen=4)
+signal_cluster_sell = deque(maxlen=17)
+
+veto_counters = {
+    "veto_spread_too_small": 0,
+    "veto_feature_fail": 0,
+    "veto_master_conviction": 0,
+    "waiting_for_cluster": 0,
+}
 
 def color_text(text, color):
     colors = {"green": "\033[92m", "red": "\033[91m", "reset": "\033[0m"}
@@ -62,44 +71,6 @@ def ensure_datetime(ts):
     else:
         dt_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
     return dt_utc.astimezone(NAIROBI_TZ)
-
-def get_adaptive_thresholds(regime: str, volatility: float, direction: int):
-    # Sell = -1, Buy = +1
-    if direction == -1:
-        # STRICT SELL: Raise the bar
-        if regime == "trending":
-            z = 1.25 + volatility * 0.45
-            conf = 0.91
-            coint = 0.75 - volatility * 0.16
-            slope = 0.00025
-        elif regime == "volatile":
-            z = 1.08 + volatility * 0.28
-            conf = 0.89
-            coint = 0.71 - volatility * 0.12
-            slope = 0.00017
-        else:
-            z = 0.97 + volatility * 0.19
-            conf = 0.88
-            coint = 0.73
-            slope = 0.00013
-    else:
-        # Adaptive BUY: More forgiving, let more longs through
-        if regime == "trending":
-            z = 0.75 + volatility * 0.12
-            conf = 0.78
-            coint = 0.63 - volatility * 0.10
-            slope = 0.00009
-        elif regime == "volatile":
-            z = 0.65 + volatility * 0.09
-            conf = 0.76
-            coint = 0.60 - volatility * 0.07
-            slope = 0.00007
-        else:
-            z = 0.55 + volatility * 0.05
-            conf = 0.74
-            coint = 0.62
-            slope = 0.00006
-    return round(z, 3), round(conf, 3), round(max(min(coint, 0.77), 0.5), 3), round(slope, 5)
 
 def check_model_features(model, features_dict, model_name):
     if hasattr(model, 'feature_names_in_'):
@@ -124,50 +95,124 @@ def check_all_models_loaded():
     ]:
         check_model_features(model, dummy, name)
 
+GATE_MODEL_PATH = "ml_model/triangular_rf_model.json"
+PAIR_MODEL_PATH = "ml_model/pair_selector_model.json"
+COINT_MODEL_PATH = "ml_model/cointegration_score_model.json"
+REGIME_MODEL_PATH = "ml_model/regime_classifier.json"
+
 confidence_filter = MLFilter(GATE_MODEL_PATH)
 pair_selector = MLFilter(PAIR_MODEL_PATH)
 cointegration_model = MLFilter(COINT_MODEL_PATH)
 regime_classifier = MLFilter(REGIME_MODEL_PATH)
 check_all_models_loaded()
 
+def get_live_config(regime, direction):
+    # Default to 'flat' if regime not found
+    best = BEST_CONFIGS.get(regime, BEST_CONFIGS["flat"])
+    return {
+        "CLUSTER_SIZE": int(best.get("base_cl_sell" if direction == -1 else "cl_buy", 17 if direction == -1 else 4)),
+        "CONVICTION_WEIGHT": float(best.get("conviction_weight", 0.15)),
+        "COINT_WEIGHT": float(best.get("coint_weight", 0.5)),
+        "ZSCORE_WEIGHT": float(best.get("zscore_weight", 0.5)),
+        "SLOPE_WEIGHT": float(best.get("slope_weight", 0.15)),
+        "MASTER_CONVICTION_THRESHOLD": float(best.get("base_thr_sell" if direction == -1 else "thr_buy", 0.80 if direction == -1 else 0.62)),
+        "MIN_SPREAD_MAGNITUDE": float(best.get("min_spread", 0.00005)),
+        "SL_PERCENT": float(best.get("sl_percent", 0.15)),
+        "TP_PERCENT": float(best.get("tp_percent", 0.55)),
+    }
+
 def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
+    global signal_cluster_buy, signal_cluster_sell, veto_counters
+
     timestamp = ensure_datetime(timestamp)
     implied_ethbtc = eth_price / btc_price
     spread = implied_ethbtc - ethbtc_price
 
-    if abs(spread) < MIN_SPREAD_MAGNITUDE:
-        log_signal_event(timestamp, spread, 0.0, 0.0, None, 0, "veto_spread_too_small")
-        return
-
     features = generate_live_features(btc_price, eth_price, ethbtc_price, WINDOW)
     if not features:
+        veto_counters["veto_feature_fail"] += 1
         log_signal_event(timestamp, spread, 0.0, 0.0, None, 0, "veto_feature_fail")
-        return
-
-    spread_z = features.get("spread_zscore", 0.0)
-    volatility = features.get("vol_spread", 0.001)
-    spread_slope = features.get("spread_slope", 0.0)
+        return None
 
     regime_input = pd.DataFrame([features]).reindex(columns=regime_classifier.model.feature_names_in_)
     regime_code = regime_classifier.predict(regime_input)[0]
     regime = regime_map.get(regime_code, "flat")
     features["regime"] = regime
 
-    # --- Confidence, Cointegration, Direction ---
     gate_input = pd.DataFrame([features]).reindex(columns=confidence_filter.model.feature_names_in_)
     check_model_features(confidence_filter.model, features, "Confidence Model")
     confidence, direction = confidence_filter.predict_with_confidence(gate_input)
+    direction = int(direction)
+
+    config = get_live_config(regime, direction)
+    CLUSTER_SIZE = config["CLUSTER_SIZE"]
+    CONVICTION_WEIGHT = config["CONVICTION_WEIGHT"]
+    COINT_WEIGHT = config["COINT_WEIGHT"]
+    ZSCORE_WEIGHT = config["ZSCORE_WEIGHT"]
+    SLOPE_WEIGHT = config["SLOPE_WEIGHT"]
+    MASTER_CONVICTION_THRESHOLD = config["MASTER_CONVICTION_THRESHOLD"]
+    MIN_SPREAD_MAGNITUDE = config["MIN_SPREAD_MAGNITUDE"]
+    SL_PERCENT = config["SL_PERCENT"]
+    TP_PERCENT = config["TP_PERCENT"]
+
+    # Re-init clusters if config changes
+    if direction == -1:
+        if signal_cluster_sell.maxlen != CLUSTER_SIZE:
+            signal_cluster_sell = deque(maxlen=CLUSTER_SIZE)
+    else:
+        if signal_cluster_buy.maxlen != CLUSTER_SIZE:
+            signal_cluster_buy = deque(maxlen=CLUSTER_SIZE)
+
+    if abs(spread) < MIN_SPREAD_MAGNITUDE:
+        veto_counters["veto_spread_too_small"] += 1
+        log_signal_event(timestamp, spread, 0.0, 0.0, None, 0, "veto_spread_too_small")
+        return None
+
+    spread_z = features.get("spread_zscore", 0.0)
+    volatility = features.get("vol_spread", 0.001)
+    spread_slope = features.get("spread_slope", 0.0)
 
     coint_input = pd.DataFrame([features]).reindex(columns=cointegration_model.model.feature_names_in_)
     check_model_features(cointegration_model.model, features, "Cointegration Model")
     coint_score, _ = cointegration_model.predict_with_confidence(coint_input)
 
-    # --- Asymmetric thresholds ---
-    zscore_threshold, confidence_threshold, cointegration_threshold, slope_threshold = get_adaptive_thresholds(
-        regime, volatility, direction
-    )
-    master_conviction_threshold = MASTER_CONVICTION_THRESHOLD_SELL if direction == -1 else MASTER_CONVICTION_THRESHOLD_BUY
-    cluster_size = CLUSTER_SIZE_SELL if direction == -1 else CLUSTER_SIZE_BUY
+    # Adaptive thresholds: stricter for shorts, adaptive for buys
+    def get_adaptive_thresholds(regime, volatility, direction):
+        if direction == -1:
+            if regime == "bull":
+                z = 1.25 + volatility * 0.45
+                conf = 0.91
+                coint = 0.75 - volatility * 0.16
+                slope = 0.00025
+            elif regime == "bear":
+                z = 1.00 + volatility * 0.30
+                conf = 0.86
+                coint = 0.70 - volatility * 0.10
+                slope = 0.00014
+            else:
+                z = 0.85 + volatility * 0.15
+                conf = 0.83
+                coint = 0.72
+                slope = 0.00010
+        else:
+            if regime == "bull":
+                z = 0.68 + volatility * 0.12
+                conf = 0.76
+                coint = 0.64 - volatility * 0.08
+                slope = 0.00007
+            elif regime == "bear":
+                z = 0.58 + volatility * 0.07
+                conf = 0.74
+                coint = 0.62 - volatility * 0.05
+                slope = 0.00005
+            else:
+                z = 0.52 + volatility * 0.04
+                conf = 0.71
+                coint = 0.61
+                slope = 0.00004
+        return round(z, 3), round(conf, 3), round(max(min(coint, 0.77), 0.5), 3), round(slope, 5)
+
+    zscore_threshold, confidence_threshold, cointegration_threshold, slope_threshold = get_adaptive_thresholds(regime, volatility, direction)
 
     pass_conf = 1 if confidence >= confidence_threshold else 0
     pass_coint = 1 if coint_score >= cointegration_threshold else 0
@@ -187,10 +232,11 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         f"slope={spread_slope:.5f}/{slope_threshold} | master_conviction={master_conviction:.2f} | direction={direction}"
     )
 
-    if direction == 0 or master_conviction < master_conviction_threshold:
+    if direction == 0 or master_conviction < MASTER_CONVICTION_THRESHOLD:
+        veto_counters["veto_master_conviction"] += 1
         log_signal_event(timestamp, spread, confidence, spread_z, direction, 0, "veto_master_conviction",
             coint_score=coint_score, regime=regime, slope=spread_slope)
-        return
+        return None
 
     # --- Directional Cluster Guard ---
     cluster = signal_cluster_sell if direction == -1 else signal_cluster_buy
@@ -203,8 +249,8 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         "master_conviction": master_conviction
     })
 
-    if len(cluster) == cluster_size and all(
-        s["direction"] == direction and s["master_conviction"] >= master_conviction_threshold
+    if len(cluster) == CLUSTER_SIZE and all(
+        s["direction"] == direction and s["master_conviction"] >= MASTER_CONVICTION_THRESHOLD
         for s in cluster
     ):
         pair_input = pd.DataFrame([features]).reindex(columns=pair_selector.model.feature_names_in_)
@@ -219,16 +265,11 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             entry_price = btc_price
             pair = "BTCUSDT"
 
-        stop_loss_pct, take_profit_pct = calculate_dynamic_sl_tp(
-            spread_zscore=spread_z,
-            vol_spread=volatility,
-            confidence=confidence,
-            regime=regime
-        )
+        stop_loss_pct = SL_PERCENT
+        take_profit_pct = TP_PERCENT
         sl_level = entry_price * (1 - stop_loss_pct / 100) if direction == 1 else entry_price * (1 + stop_loss_pct / 100)
         tp_level = entry_price * (1 + take_profit_pct / 100) if direction == 1 else entry_price * (1 - take_profit_pct / 100)
 
-        # ---- LOG EXECUTION ----
         log_execution_event(
             timestamp=timestamp, pair=pair, direction=direction, entry_price=entry_price,
             confidence=confidence, cointegration_score=coint_score, spread_zscore=spread_z, spread_slope=spread_slope,
@@ -250,15 +291,33 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
                f"Dir={side} | Leg={selected_leg} | Time={local_time_str}\n")
         print(color_text(msg, color))
         cluster.clear()  # Reset the cluster to avoid double-execution
+
+        # --- For backtest: return trade info ---
+        return {
+            "timestamp": timestamp,
+            "pair": pair,
+            "direction": direction,
+            "entry_price": entry_price,
+            "confidence": confidence,
+            "cointegration_score": coint_score,
+            "spread_zscore": spread_z,
+            "spread_slope": spread_slope,
+            "regime": regime,
+            "stop_loss": sl_level,
+            "take_profit": tp_level,
+            "pnl": None,
+        }
     else:
+        veto_counters["waiting_for_cluster"] += 1
         log_signal_event(
             timestamp, spread, confidence, spread_z, direction, 0, "waiting_for_cluster",
             coint_score=coint_score, regime=regime, slope=spread_slope
         )
+        return None
 
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    logging.info("🚀 XAlgo: Asymmetric, Strict-Sell, Adaptive-Buy, Cluster-Guarded Signal Engine Starting...")
+    logging.info("🚀 XAlgo: Dynamic, Regime-Adaptive, Cluster-Guarded Signal Engine Starting...")
     ingestor = BinanceIngestor()
     await ingestor.stream(process_tick)
 
