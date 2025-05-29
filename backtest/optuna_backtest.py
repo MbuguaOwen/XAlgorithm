@@ -49,64 +49,34 @@ def best_entry_in_window(entry_price, direction, prices, sl_percent, tp_percent)
             best_entry = trial_entry
     return best_entry, best_pnl, best_r_r
 
-def get_regime(row):
-    returns = row['btc_price'] - row.get('btc_price_prev', row['btc_price'])
-    if returns > 0.5:
-        return 'bull'
-    elif returns < -0.5:
-        return 'bear'
-    else:
-        return 'neutral'
-
 def run_backtest(
     df,
     base_thr_sell,
     thr_buy,
     sl_percent,
     tp_percent,
-    conviction_weight,
-    coint_weight,
-    zscore_weight,
-    slope_weight,
-    sniper_window,
-    base_cl_sell=17,
-    cl_buy=4,
-    min_spread=0.00008
+    sniper_window=12,
+    cluster_size_sell=17,
+    cluster_size_buy=4,
 ):
-    import main
-    main.CONVICTION_WEIGHT = conviction_weight
-    main.COINT_WEIGHT = coint_weight
-    main.ZSCORE_WEIGHT = zscore_weight
-    main.SLOPE_WEIGHT = slope_weight
-    main.MASTER_CONVICTION_THRESHOLD_BUY = thr_buy
-    main.CLUSTER_SIZE_BUY = cl_buy
-    main.MIN_SPREAD_MAGNITUDE = min_spread
-    main.signal_cluster_buy = deque(maxlen=cl_buy)
-    main.veto_counters = {k: 0 for k in main.veto_counters}
-
+    # Initialize clusters for test run
+    signal_cluster_buy = deque(maxlen=cluster_size_buy)
+    signal_cluster_sell = deque(maxlen=cluster_size_sell)
     trades = []
     n_rows = len(df)
-    prev_btc = None
-    for i, row in df.iterrows():
-        if prev_btc is not None:
-            row['btc_price_prev'] = prev_btc
-        regime = get_regime(row)
-        prev_btc = row['btc_price']
-        if regime == 'bull':
-            master_threshold_sell = base_thr_sell
-            cluster_size_sell = base_cl_sell
-        elif regime == 'bear':
-            master_threshold_sell = max(0.55, base_thr_sell - 0.2)
-            cluster_size_sell = max(3, base_cl_sell - 10)
-        else:
-            master_threshold_sell = base_thr_sell - 0.1
-            cluster_size_sell = max(5, base_cl_sell - 5)
-        main.MASTER_CONVICTION_THRESHOLD_SELL = master_threshold_sell
-        main.CLUSTER_SIZE_SELL = cluster_size_sell
-        main.signal_cluster_sell = deque(maxlen=cluster_size_sell)
 
-        trade = main.process_tick(
-            row['timestamp'], row['btc_price'], row['eth_price'], row['ethbtc_price']
+    for i, row in df.iterrows():
+        # Pass thresholds into process_tick (must update main.py to accept them as arguments if not already)
+        trade = process_tick(
+            row['timestamp'], row['btc_price'], row['eth_price'], row['ethbtc_price'],
+            base_thr_sell=base_thr_sell,
+            thr_buy=thr_buy,
+            sl_percent=sl_percent,
+            tp_percent=tp_percent,
+            cluster_buy=cluster_size_buy,
+            cluster_sell=cluster_size_sell,
+            signal_cluster_buy=signal_cluster_buy,
+            signal_cluster_sell=signal_cluster_sell,
         )
         if trade is not None:
             idx = i
@@ -125,41 +95,28 @@ def run_backtest(
                 "pnl": realized_pnl,
                 "r_r": best_r_r
             })
-
     if not trades:
         return 0, 0, 0
-    else:
-        pnls = [t['pnl'] for t in trades]
-        returns = np.array(pnls)
-        sharpe = np.mean(returns) / (np.std(returns) + 1e-9)
-        win_rate = np.mean([p > 0 for p in pnls])
-        rr_realized = np.nanmean([t['r_r'] for t in trades if not np.isnan(t['r_r'])])
-        return rr_realized, sharpe, win_rate
+    pnls = [t['pnl'] for t in trades]
+    returns = np.array(pnls)
+    sharpe = np.mean(returns) / (np.std(returns) + 1e-9)
+    win_rate = np.mean([p > 0 for p in pnls])
+    rr_realized = np.nanmean([t['r_r'] for t in trades if not np.isnan(t['r_r'])])
+    return rr_realized, sharpe, win_rate
 
 def objective(trial):
-    # Use data slice for fast tuning
     df = df_tune
-    conviction_weight = trial.suggest_float('conviction_weight', 0.10, 0.20)
-    coint_weight      = trial.suggest_float('coint_weight', 0.35, 0.60)
-    zscore_weight     = trial.suggest_float('zscore_weight', 0.30, 0.60)
-    slope_weight      = trial.suggest_float('slope_weight', 0.10, 0.20)
-    sniper_window     = trial.suggest_int('sniper_window', 5, 13)
-    base_thr_sell     = trial.suggest_float('base_thr_sell', 0.70, 0.95)
-    thr_buy           = trial.suggest_float('thr_buy', 0.62, 0.80)
-    sl_percent        = trial.suggest_float('sl_percent', 0.15, 0.20)
-    tp_percent        = trial.suggest_float('tp_percent', 0.40, 0.75)
-
+    # Only tune the 4 trade gates!
+    base_thr_sell = trial.suggest_float('base_thr_sell', 0.80, 0.99)
+    thr_buy       = trial.suggest_float('thr_buy', 0.70, 0.88)
+    sl_percent    = trial.suggest_float('sl_percent', 0.15, 0.20)
+    tp_percent    = trial.suggest_float('tp_percent', 0.54, 0.75)
     rr_realized, sharpe, win_rate = run_backtest(
         df,
         base_thr_sell,
         thr_buy,
         sl_percent,
-        tp_percent,
-        conviction_weight,
-        coint_weight,
-        zscore_weight,
-        slope_weight,
-        sniper_window
+        tp_percent
     )
     # Prune poor trials: abort if no trades or R:R < 1
     if rr_realized < 1 or sharpe < 0.5 or win_rate < 0.3:
@@ -169,7 +126,7 @@ def objective(trial):
 if __name__ == "__main__":
     print(f"\nLoaded {len(df_tune):,} rows for parameter tuning (fast mode)")
     study = optuna.create_study(direction="maximize")
-    study.optimize(objective, n_trials=40, n_jobs=2, show_progress_bar=True)  # 2 jobs = faster startup
+    study.optimize(objective, n_trials=40, n_jobs=2, show_progress_bar=True)
 
     print("\n==== Top Trials ====")
     df_trials = study.trials_dataframe()

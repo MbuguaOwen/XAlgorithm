@@ -1,22 +1,96 @@
-# Python artifacts
+# === Python Artifacts ===
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.pyd
+*.so
+*.egg-info/
+*.egg
+
+# === Virtual Environments ===
 venv/
 .venv/
+.env/
 .env
+pip-wheel-metadata/
 
-# System files
+# === Editor/IDE Files ===
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# === OS/System Files ===
 .DS_Store
+Thumbs.db
+ehthumbs.db
+Icon?
+Desktop.ini
 
-# Logs
+# === Logs ===
 logs/*
-!logs/signal_log.csv
+!logs/signal_log.csv          # Keep empty (or real) trade log for audit
 
-# Jupyter
+# === Jupyter Notebooks ===
 .ipynb_checkpoints/
+*.ipynb
 
-# Temp
+# === Temp and Output Files ===
 *.log
 *.tmp
+*.bak
+*.swp
+*.swo
+*.old
+
+# === Model Artifacts (keep only .pkl for production, exclude temp/JSON if not needed) ===
+ml_model/*.json
+!ml_model/*.pkl
+
+# === Data Files ===
+data/*
+!data/README.md               # Keep README describing data format/sources
+!data/sample*.csv             # Optionally keep sample datasets, remove for prod
+
+# === Model Training Results ===
+*.h5
+*.hdf5
+*.ckpt
+*.pb
+*.npz
+*.csv
+gridsearch_results.csv
+optuna_backtest_results.csv   # These are reproducible, exclude if you want ultra-clean
+
+# === Secrets (optional, if you use .secrets or .env) ===
+.secrets/
+*.key
+*.pem
+
+# === Notebook Output Artifacts ===
+*.nbconvert.ipynb
+*.out.ipynb
+
+# === Misc (cache, temp folders, etc.) ===
+.cache/
+__results__/
+output/
+build/
+dist/
+*.manifest
+*.spec
+
+# === Test/Debug Output ===
+coverage.xml
+htmlcov/
+*.cover
+*.py,cover
+
+# === Optional: Ignore test artifacts, but keep core test code ===
+tests/tmp/
+tests/__pycache__/
+
+# === Optional: XAlgo-specific (add any extra directories you know are temp/data) ===
+# data/raw/
+# data/downloads/
