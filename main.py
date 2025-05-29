@@ -19,24 +19,21 @@ from data.binance_ingestor import BinanceIngestor
 
 # === ONLY 4 MANUAL THRESHOLDS PER REGIME ===
 BEST_CONFIGS = {
-    "bull":    {"base_thr_sell": 0.99, "thr_buy": 0.88, "sl_percent": 0.18, "tp_percent": 0.54},
-    "bear":    {"base_thr_sell": 0.90, "thr_buy": 0.89, "sl_percent": 0.17, "tp_percent": 0.51},
-    "flat":    {"base_thr_sell": 0.90, "thr_buy": 0.80, "sl_percent": 0.18, "tp_percent": 0.52},
-    "neutral": {"base_thr_sell": 0.85, "thr_buy": 0.75, "sl_percent": 0.16, "tp_percent": 0.48},
+    "bull":    {"base_thr_sell": 0.99, "thr_buy": 0.90, "sl_percent": 0.18, "tp_percent": 0.54},
+    "bear":    {"base_thr_sell": 0.90, "thr_buy": 0.94, "sl_percent": 0.17, "tp_percent": 0.51},
+    "flat":    {"base_thr_sell": 0.90, "thr_buy": 0.90, "sl_percent": 0.18, "tp_percent": 0.52},
+    "neutral": {"base_thr_sell": 0.90, "thr_buy": 0.90, "sl_percent": 0.16, "tp_percent": 0.48},
 }
 
 reverse_pair_map = {0: "BTC", 1: "ETH"}
 regime_map = {0: "bull", 1: "bear", 2: "flat"}
 NAIROBI_TZ = pytz.timezone("Africa/Nairobi")
 
-# --- Window for feature engineering (memory for moving stats)
 WINDOW = deque(maxlen=200)
 
-# --- Cluster buffers (static, minimal, adjust if desired)
 signal_cluster_buy = deque(maxlen=4)
 signal_cluster_sell = deque(maxlen=17)
 
-# --- ML Model Paths
 GATE_MODEL_PATH   = "ml_model/triangular_rf_model.json"
 PAIR_MODEL_PATH   = "ml_model/pair_selector_model.json"
 COINT_MODEL_PATH  = "ml_model/cointegration_score_model.json"
@@ -62,21 +59,25 @@ def get_live_config(regime, direction):
         "MASTER_CONVICTION_THRESHOLD": float(best["base_thr_sell"] if direction == -1 else best["thr_buy"]),
         "SL_PERCENT": float(best["sl_percent"]),
         "TP_PERCENT": float(best["tp_percent"]),
-        "CLUSTER_SIZE": 19 if direction == -1 else 10,
+        "CLUSTER_SIZE": 19 if direction == -1 else 9,
     }
 
 def color_text(text, color):
     colors = {"green": "\033[92m", "red": "\033[91m", "reset": "\033[0m"}
     return f"{colors[color]}{text}{colors['reset']}"
 
-def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
+def process_tick(
+    timestamp, btc_price, eth_price, ethbtc_price,
+    base_thr_sell=None, thr_buy=None, sl_percent=None, tp_percent=None,
+    cluster_buy=None, cluster_sell=None,
+    signal_cluster_buy_override=None, signal_cluster_sell_override=None
+):
     global signal_cluster_buy, signal_cluster_sell
 
     timestamp = ensure_datetime(timestamp)
     implied_ethbtc = eth_price / btc_price
     spread = implied_ethbtc - ethbtc_price
 
-    # --- Pass in WINDOW for memory features
     features = generate_live_features(btc_price, eth_price, ethbtc_price, WINDOW)
     if not features:
         log_signal_event(timestamp, spread, 0.0, 0.0, None, 0, "veto_feature_fail")
@@ -97,7 +98,21 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         log_signal_event(timestamp, spread, confidence, features.get("spread_zscore", 0), direction, 0, "veto_no_trade")
         return None
 
+    # ---- Use passed-in thresholds if provided (for backtest/Optuna) ----
     config = get_live_config(regime, direction)
+    if base_thr_sell is not None and direction == -1:
+        config["MASTER_CONVICTION_THRESHOLD"] = base_thr_sell
+    if thr_buy is not None and direction == 1:
+        config["MASTER_CONVICTION_THRESHOLD"] = thr_buy
+    if sl_percent is not None:
+        config["SL_PERCENT"] = sl_percent
+    if tp_percent is not None:
+        config["TP_PERCENT"] = tp_percent
+    if cluster_buy is not None and direction == 1:
+        config["CLUSTER_SIZE"] = cluster_buy
+    if cluster_sell is not None and direction == -1:
+        config["CLUSTER_SIZE"] = cluster_sell
+
     CLUSTER_SIZE = config["CLUSTER_SIZE"]
     MASTER_CONVICTION_THRESHOLD = config["MASTER_CONVICTION_THRESHOLD"]
     SL_PERCENT = config["SL_PERCENT"]
@@ -108,13 +123,19 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
     coint_score, _ = cointegration_model.predict_with_confidence(coint_input)
 
     # --- 4. Directional cluster guard
-    cluster = signal_cluster_sell if direction == -1 else signal_cluster_buy
-    if cluster.maxlen != CLUSTER_SIZE:
-        cluster = deque(maxlen=CLUSTER_SIZE)
-        if direction == -1:
-            signal_cluster_sell = cluster
-        else:
-            signal_cluster_buy = cluster
+    # Accept override clusters for backtest, otherwise use global clusters
+    if direction == -1:
+        cluster = signal_cluster_sell_override if signal_cluster_sell_override is not None else signal_cluster_sell
+        if cluster.maxlen != CLUSTER_SIZE:
+            cluster = deque(maxlen=CLUSTER_SIZE)
+            if signal_cluster_sell_override is None:
+                signal_cluster_sell = cluster
+    else:
+        cluster = signal_cluster_buy_override if signal_cluster_buy_override is not None else signal_cluster_buy
+        if cluster.maxlen != CLUSTER_SIZE:
+            cluster = deque(maxlen=CLUSTER_SIZE)
+            if signal_cluster_buy_override is None:
+                signal_cluster_buy = cluster
 
     cluster.append({
         "direction": direction,
