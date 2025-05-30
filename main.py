@@ -19,10 +19,10 @@ from data.binance_ingestor import BinanceIngestor
 
 # === ONLY 4 MANUAL THRESHOLDS PER REGIME ===
 BEST_CONFIGS = {
-    "bull":    {"base_thr_sell": 0.98, "thr_buy": 0.86, "sl_percent": 0.18, "tp_percent": 0.61},
-    "bear":    {"base_thr_sell": 0.88, "thr_buy": 0.97, "sl_percent": 0.17, "tp_percent": 0.51},
-    "flat":    {"base_thr_sell": 0.90, "thr_buy": 0.90, "sl_percent": 0.18, "tp_percent": 0.52},
-    "neutral": {"base_thr_sell": 0.90, "thr_buy": 0.90, "sl_percent": 0.16, "tp_percent": 0.48},
+    "bull":    {"base_thr_sell": 0.98, "thr_buy": 0.77, "sl_percent": 0.19, "tp_percent": 0.61},
+    "bear":    {"base_thr_sell": 0.98, "thr_buy": 0.77, "sl_percent": 0.19, "tp_percent": 0.61},
+    "flat":    {"base_thr_sell": 0.90, "thr_buy": 0.70, "sl_percent": 0.20, "tp_percent": 0.81},
+    "neutral": {"base_thr_sell": 0.90, "thr_buy": 0.70, "sl_percent": 0.20, "tp_percent": 0.81},
 }
 
 reverse_pair_map = {0: "BTC", 1: "ETH"}
@@ -35,9 +35,9 @@ signal_cluster_sell = deque(maxlen=19)
 
 # --- Trade lock & reversal clusters ---
 active_trades = {}  # {"BTCUSDT": {...}, "ETHUSDT": {...}}
-reverse_signal_cluster_buy = deque(maxlen=14)   # 1.5x 9
-reverse_signal_cluster_sell = deque(maxlen=29)  # 1.5x 19
-REVERSAL_CONVICTION_BONUS = 0.05               # Must be +0.05 higher threshold
+reverse_signal_cluster_buy = deque(maxlen=24)   # 3 x 9
+reverse_signal_cluster_sell = deque(maxlen= 39)  # 3 x 19
+REVERSAL_CONVICTION_BONUS = 0.1                 # Must be +0.1 higher threshold
 
 GATE_MODEL_PATH   = "ml_model/triangular_rf_model.json"
 PAIR_MODEL_PATH   = "ml_model/pair_selector_model.json"
@@ -193,7 +193,7 @@ def process_tick(
 
         # --- Build reverse cluster for opposite direction ---
         reverse_direction = -direction_lock
-        reverse_cluster_size = 14 if reverse_direction == 1 else 29  # 1.5x entry cluster size
+        reverse_cluster_size = 24 if reverse_direction == 1 else 39  # 1.5x entry cluster size
         reverse_conviction_threshold = (get_live_config(regime, reverse_direction)["MASTER_CONVICTION_THRESHOLD"]
                                         + REVERSAL_CONVICTION_BONUS)
         if reverse_direction == 1:

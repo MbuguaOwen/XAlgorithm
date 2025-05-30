@@ -6,7 +6,14 @@ import seaborn as sns
 
 TICK_CSV = "data/triangular_ticks.csv"
 df = pd.read_csv(TICK_CSV)
-N_TUNE_ROWS = 100   # Set None for all data, or pick a number for speed
+
+# --- Date filtering logic added ---
+DATE_START = '2022-01-01'
+DATE_END = '2022-02-01'
+df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+df = df[(df['timestamp'] >= DATE_START) & (df['timestamp'] < DATE_END)].copy()
+
+N_TUNE_ROWS = None   # Set None for all data, or pick a number for speed
 if N_TUNE_ROWS:
     df = df.iloc[:N_TUNE_ROWS].copy()
 
