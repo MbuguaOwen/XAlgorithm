@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# main.py – XAlgo: Clean Room ML Arbitrage Engine (Only 4 Manual Thresholds, All-Model Filtering)
+# main.py – XAlgo: Master Conviction, Reversal, & Trade Lock Engine (Production Grade)
 
 import asyncio
 import logging
@@ -19,8 +19,8 @@ from data.binance_ingestor import BinanceIngestor
 
 # === ONLY 4 MANUAL THRESHOLDS PER REGIME ===
 BEST_CONFIGS = {
-    "bull":    {"base_thr_sell": 0.99, "thr_buy": 0.90, "sl_percent": 0.18, "tp_percent": 0.54},
-    "bear":    {"base_thr_sell": 0.90, "thr_buy": 0.94, "sl_percent": 0.17, "tp_percent": 0.51},
+    "bull":    {"base_thr_sell": 0.98, "thr_buy": 0.86, "sl_percent": 0.18, "tp_percent": 0.61},
+    "bear":    {"base_thr_sell": 0.88, "thr_buy": 0.97, "sl_percent": 0.17, "tp_percent": 0.51},
     "flat":    {"base_thr_sell": 0.90, "thr_buy": 0.90, "sl_percent": 0.18, "tp_percent": 0.52},
     "neutral": {"base_thr_sell": 0.90, "thr_buy": 0.90, "sl_percent": 0.16, "tp_percent": 0.48},
 }
@@ -30,9 +30,14 @@ regime_map = {0: "bull", 1: "bear", 2: "flat"}
 NAIROBI_TZ = pytz.timezone("Africa/Nairobi")
 
 WINDOW = deque(maxlen=200)
+signal_cluster_buy = deque(maxlen=9)
+signal_cluster_sell = deque(maxlen=19)
 
-signal_cluster_buy = deque(maxlen=4)
-signal_cluster_sell = deque(maxlen=17)
+# --- Trade lock & reversal clusters ---
+active_trades = {}  # {"BTCUSDT": {...}, "ETHUSDT": {...}}
+reverse_signal_cluster_buy = deque(maxlen=14)   # 1.5x 9
+reverse_signal_cluster_sell = deque(maxlen=29)  # 1.5x 19
+REVERSAL_CONVICTION_BONUS = 0.05               # Must be +0.05 higher threshold
 
 GATE_MODEL_PATH   = "ml_model/triangular_rf_model.json"
 PAIR_MODEL_PATH   = "ml_model/pair_selector_model.json"
@@ -66,13 +71,24 @@ def color_text(text, color):
     colors = {"green": "\033[92m", "red": "\033[91m", "reset": "\033[0m"}
     return f"{colors[color]}{text}{colors['reset']}"
 
+def check_trade_closed(pair, price, direction, sl_level, tp_level):
+    """Check if SL or TP hit for an active trade on this pair."""
+    if direction == 1:  # Long
+        if price <= sl_level or price >= tp_level:
+            return True
+    else:  # Short
+        if price >= sl_level or price <= tp_level:
+            return True
+    return False
+
 def process_tick(
     timestamp, btc_price, eth_price, ethbtc_price,
     base_thr_sell=None, thr_buy=None, sl_percent=None, tp_percent=None,
     cluster_buy=None, cluster_sell=None,
     signal_cluster_buy_override=None, signal_cluster_sell_override=None
 ):
-    global signal_cluster_buy, signal_cluster_sell
+    global signal_cluster_buy, signal_cluster_sell, active_trades
+    global reverse_signal_cluster_buy, reverse_signal_cluster_sell
 
     timestamp = ensure_datetime(timestamp)
     implied_ethbtc = eth_price / btc_price
@@ -123,7 +139,6 @@ def process_tick(
     coint_score, _ = cointegration_model.predict_with_confidence(coint_input)
 
     # --- 4. Directional cluster guard
-    # Accept override clusters for backtest, otherwise use global clusters
     if direction == -1:
         cluster = signal_cluster_sell_override if signal_cluster_sell_override is not None else signal_cluster_sell
         if cluster.maxlen != CLUSTER_SIZE:
@@ -143,30 +158,104 @@ def process_tick(
         "coint": coint_score,
     })
 
-    # --- Extract spread_zscore and spread_slope for logging
     spread_zscore = features.get("spread_zscore", 0.0)
     spread_slope  = features.get("spread_slope", 0.0)
 
+    # --- 5. Pair selector: BTC or ETH trade
+    pair_input = pd.DataFrame([features]).reindex(columns=pair_selector.model.feature_names_in_)
+    pair_code = pair_selector.predict(pair_input)[0]
+    selected_leg = reverse_pair_map.get(pair_code)
+
+    if selected_leg == "ETH":
+        entry_price = eth_price
+        pair = "ETHUSDT"
+        live_price = eth_price
+    else:
+        entry_price = btc_price
+        pair = "BTCUSDT"
+        live_price = btc_price
+
+    # === MASTER TRADE LOCK & REVERSAL LOGIC ===
+    if pair in active_trades:
+        # Check if SL/TP hit
+        trade = active_trades[pair]
+        direction_lock = trade['direction']
+        sl_level = trade['sl_level']
+        tp_level = trade['tp_level']
+        if check_trade_closed(pair, live_price, direction_lock, sl_level, tp_level):
+            del active_trades[pair]
+            # Clear all clusters so next entry requires full cluster
+            signal_cluster_buy.clear()
+            signal_cluster_sell.clear()
+            reverse_signal_cluster_buy.clear()
+            reverse_signal_cluster_sell.clear()
+            return None  # Unlock, require new cluster next bar
+
+        # --- Build reverse cluster for opposite direction ---
+        reverse_direction = -direction_lock
+        reverse_cluster_size = 14 if reverse_direction == 1 else 29  # 1.5x entry cluster size
+        reverse_conviction_threshold = (get_live_config(regime, reverse_direction)["MASTER_CONVICTION_THRESHOLD"]
+                                        + REVERSAL_CONVICTION_BONUS)
+        if reverse_direction == 1:
+            reverse_cluster = reverse_signal_cluster_buy
+        else:
+            reverse_cluster = reverse_signal_cluster_sell
+
+        if direction == reverse_direction and \
+           confidence >= reverse_conviction_threshold and coint_score >= 0.8:
+            reverse_cluster.append({
+                "direction": direction,
+                "confidence": confidence,
+                "coint": coint_score,
+            })
+        else:
+            reverse_cluster.clear()  # Reset if no new strong reverse
+
+        # Emergency exit only if reverse cluster is FULL and all strong
+        if len(reverse_cluster) == reverse_cluster_size and all(
+            s["direction"] == reverse_direction and
+            s["confidence"] >= reverse_conviction_threshold and
+            s["coint"] >= 0.8
+            for s in reverse_cluster
+        ):
+            del active_trades[pair]
+            signal_cluster_buy.clear()
+            signal_cluster_sell.clear()
+            reverse_signal_cluster_buy.clear()
+            reverse_signal_cluster_sell.clear()
+            log_signal_event(
+                timestamp, spread, confidence, spread_zscore, reverse_direction, 0, "emergency_exit_reversal",
+                coint_score=coint_score, regime=regime, selected_leg=selected_leg,
+                entry_level=entry_price
+            )
+            print(color_text(f"\nEMERGENCY EXIT [{pair}]: "
+                             f"Conviction {confidence:.3f} | Regime={regime} | Time={timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n", "red"))
+            return None  # Exit, require full new cluster for re-entry
+
+        # If trade still open and no reversal, block new entry
+        log_signal_event(
+            timestamp, spread, confidence, spread_zscore, direction, 0, "veto_trade_lock_active",
+            coint_score=coint_score, regime=regime
+        )
+        return None
+
+    # === NORMAL ENTRY LOGIC ===
     if len(cluster) == CLUSTER_SIZE and all(
         s["direction"] == direction and s["confidence"] >= MASTER_CONVICTION_THRESHOLD and s["coint"] >= 0.8
         for s in cluster
     ):
-        # --- 5. Pair selector: BTC or ETH trade
-        pair_input = pd.DataFrame([features]).reindex(columns=pair_selector.model.feature_names_in_)
-        pair_code = pair_selector.predict(pair_input)[0]
-        selected_leg = reverse_pair_map.get(pair_code)
-
-        if selected_leg == "ETH":
-            entry_price = eth_price
-            pair = "ETHUSDT"
-        else:
-            entry_price = btc_price
-            pair = "BTCUSDT"
-
         stop_loss_pct = SL_PERCENT
         take_profit_pct = TP_PERCENT
         sl_level = entry_price * (1 - stop_loss_pct / 100) if direction == 1 else entry_price * (1 + stop_loss_pct / 100)
         tp_level = entry_price * (1 + take_profit_pct / 100) if direction == 1 else entry_price * (1 - take_profit_pct / 100)
+
+        # Register active trade lock
+        active_trades[pair] = {
+            "direction": direction,
+            "entry_price": entry_price,
+            "sl_level": sl_level,
+            "tp_level": tp_level
+        }
 
         log_execution_event(
             timestamp=timestamp, pair=pair, direction=direction, entry_price=entry_price,
@@ -202,7 +291,7 @@ def process_tick(
 
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    logging.info("🚀 XAlgo: Clean Room Model-Driven Signal Engine Starting...")
+    logging.info("🚀 XAlgo: Master Conviction, Reversal & Trade Lock Engine Starting...")
     ingestor = BinanceIngestor()
     await ingestor.stream(process_tick)
 
