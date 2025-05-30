@@ -72,14 +72,20 @@ def color_text(text, color):
     return f"{colors[color]}{text}{colors['reset']}"
 
 def check_trade_closed(pair, price, direction, sl_level, tp_level):
-    """Check if SL or TP hit for an active trade on this pair."""
+    """Proper directional SL/TP logic for long and short trades."""
     if direction == 1:  # Long
-        if price <= sl_level or price >= tp_level:
-            return True
-    else:  # Short
-        if price >= sl_level or price <= tp_level:
-            return True
-    return False
+        if price >= tp_level:
+            return True  # Take Profit hit
+        elif price <= sl_level:
+            return True  # Stop Loss hit
+        
+    elif direction == -1:  # SHORT
+        if price <= tp_level:
+            return True  # Take Profit hit
+        elif price >= sl_level:
+            return True  # Stop Loss hit
+    return False 
+      
 
 def process_tick(
     timestamp, btc_price, eth_price, ethbtc_price,
