@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# main.py – XAlgo: Master Conviction Engine with Smart Exit, Cooldown, and Strategic Retreat Logic
+# main.py – XAlgo: Master Conviction Engine with Composite Exit Scoring & Adaptive Retreat Logic
 
 import asyncio
 import logging
@@ -59,6 +59,12 @@ def color_text(text, color):
 
 def check_trade_closed(price, direction, sl_level, tp_level):
     return (price >= tp_level or price <= sl_level) if direction == 1 else (price <= tp_level or price >= sl_level)
+
+def compute_composite_exit_score(confidence, entry_conf, coint_score, spread_zscore):
+    conf_decay = max(0, 1 - (confidence / entry_conf)) if entry_conf > 0 else 1
+    coint_decay = max(0, 1 - coint_score)
+    z_reversal = 1 if (spread_zscore < -0.25) or (spread_zscore > 0.25) else 0
+    return 0.4 * conf_decay + 0.3 * coint_decay + 0.3 * z_reversal
 
 def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
     timestamp = ensure_datetime(timestamp)
@@ -126,17 +132,13 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         reverse_cluster = reverse_cluster_map[pair]
         reverse_cluster.append({"confidence": confidence, "zscore": spread_zscore, "coint": coint_score})
 
+        composite_score = compute_composite_exit_score(confidence, entry_conf, coint_score, spread_zscore)
+
         exit_reason = None
         if check_trade_closed(live_price, direction, trade["sl_level"], trade["tp_level"]):
             exit_reason = "tp_hit" if (direction == 1 and live_price >= trade["tp_level"]) or (direction == -1 and live_price <= trade["tp_level"]) else "sl_hit"
-        elif confidence < 0.65 and confidence < 0.75 * entry_conf:
-            exit_reason = "ml_confidence_decay"
-        elif coint_score < 0.60:
-            exit_reason = "cointegration_break"
-        elif (direction == 1 and spread_zscore < -0.25) or (direction == -1 and spread_zscore > 0.25):
-            exit_reason = "zscore_flip_reversal"
-        elif retrace > 0.5:
-            exit_reason = "price_retrace"
+        elif composite_score > 0.65:
+            exit_reason = "composite_exit"
         elif len(reverse_cluster) == reverse_cluster.maxlen and all(
             c["confidence"] < 0.6 or abs(c["zscore"]) < 0.25 or c["coint"] < 0.7 for c in reverse_cluster):
             exit_reason = "reverse_cluster_exit"
@@ -144,7 +146,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         if exit_reason:
             log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, exit_reason,
                              coint_score=coint_score, regime=regime)
-            print(color_text(f"\n📛 EXIT [{pair}] Reason: {exit_reason.upper()} | Price={live_price:.2f} @ {timestamp.strftime('%H:%M:%S')}\n", "yellow"))
+            print(color_text(f"\n🚫 EXIT [{pair}] Reason: {exit_reason.upper()} | Price={live_price:.2f} | Score={composite_score:.2f} @ {timestamp.strftime('%H:%M:%S')}\n", "yellow"))
             del active_trades[pair]
             cluster.clear()
             reverse_cluster.clear()
@@ -191,7 +193,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
 
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    logging.info("🚀 XAlgo: Smart Conviction Engine Starting...")
+    logging.info("\ud83d\ude80 XAlgo: Smart Conviction Engine Starting...")
     ingestor = BinanceIngestor()
     await ingestor.stream(process_tick)
 
