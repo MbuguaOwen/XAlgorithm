@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# main.py – XAlgo: Master Conviction Engine with Smart Exit & Cooldown Logic
+# main.py – XAlgo: Master Conviction Engine with Smart Exit, Cooldown, and Strategic Retreat Logic
 
 import asyncio
 import logging
@@ -30,7 +30,8 @@ regime_map = {0: "bull", 1: "bear", 2: "flat"}
 WINDOW = deque(maxlen=200)
 cluster_map = defaultdict(lambda: deque(maxlen=5))
 active_trades = {}
-locked_until = {}  # Cooldown tracker
+locked_until = {}
+reverse_cluster_map = defaultdict(lambda: deque(maxlen=4))
 
 confidence_filter   = MLFilter("ml_model/triangular_rf_model.json")
 pair_selector       = MLFilter("ml_model/pair_selector_model.json")
@@ -119,17 +120,26 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         trade["min_price"] = peak_price if direction == -1 else trade["min_price"]
         retrace = abs((live_price - peak_price) / peak_price)
 
+        entry_conf = trade.get("entry_confidence", confidence)
+        entry_z = trade.get("entry_z", spread_zscore)
+
+        reverse_cluster = reverse_cluster_map[pair]
+        reverse_cluster.append({"confidence": confidence, "zscore": spread_zscore, "coint": coint_score})
+
         exit_reason = None
         if check_trade_closed(live_price, direction, trade["sl_level"], trade["tp_level"]):
             exit_reason = "tp_hit" if (direction == 1 and live_price >= trade["tp_level"]) or (direction == -1 and live_price <= trade["tp_level"]) else "sl_hit"
-        elif confidence < 0.60:
-            exit_reason = "confidence_drop"
+        elif confidence < 0.65 and confidence < 0.75 * entry_conf:
+            exit_reason = "ml_confidence_decay"
         elif coint_score < 0.60:
-            exit_reason = "coint_break"
+            exit_reason = "cointegration_break"
         elif (direction == 1 and spread_zscore < -0.25) or (direction == -1 and spread_zscore > 0.25):
-            exit_reason = "zscore_revert"
+            exit_reason = "zscore_flip_reversal"
         elif retrace > 0.5:
-            exit_reason = "retrace_50"
+            exit_reason = "price_retrace"
+        elif len(reverse_cluster) == reverse_cluster.maxlen and all(
+            c["confidence"] < 0.6 or abs(c["zscore"]) < 0.25 or c["coint"] < 0.7 for c in reverse_cluster):
+            exit_reason = "reverse_cluster_exit"
 
         if exit_reason:
             log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, exit_reason,
@@ -137,6 +147,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             print(color_text(f"\n📛 EXIT [{pair}] Reason: {exit_reason.upper()} | Price={live_price:.2f} @ {timestamp.strftime('%H:%M:%S')}\n", "yellow"))
             del active_trades[pair]
             cluster.clear()
+            reverse_cluster.clear()
             locked_until[pair] = timestamp + timedelta(seconds=15)
             return
 
@@ -158,6 +169,8 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             "tp_level": tp,
             "max_price": entry_price,
             "min_price": entry_price,
+            "entry_confidence": confidence,
+            "entry_z": spread_zscore,
         }
 
         log_execution_event(timestamp, pair, direction, entry_price, confidence, coint_score, regime,
@@ -170,6 +183,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         print(color_text(f"\n{['SELL','HOLD','BUY'][direction]} SIGNAL [{pair}] | Entry={entry_price:.2f} SL={sl:.2f} TP={tp:.2f} | Regime={regime} @ {timestamp.strftime('%H:%M:%S')}\n",
                          "green" if direction == 1 else "red"))
         cluster.clear()
+        reverse_cluster_map[pair].clear()
         return
 
     log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, "waiting_for_cluster",
