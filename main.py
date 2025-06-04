@@ -1,11 +1,11 @@
 #!/usr/bin/env python
-# main.py – XAlgo: Master Conviction, Reversal, & Trade Lock Engine (Production Grade)
+# main.py – XAlgo: Master Conviction Engine with Smart Exit & Cooldown Logic
 
 import asyncio
 import logging
 import pandas as pd
-from collections import deque
-from datetime import datetime
+from collections import deque, defaultdict
+from datetime import datetime, timedelta
 import pytz
 import sys
 import os
@@ -17,7 +17,6 @@ from core.feature_pipeline import generate_live_features
 from core.trade_logger import log_signal_event, log_execution_event
 from data.binance_ingestor import BinanceIngestor
 
-# === ONLY 4 MANUAL THRESHOLDS PER REGIME ===
 BEST_CONFIGS = {
     "bull":    {"base_thr_sell": 0.98, "thr_buy": 0.77, "sl_percent": 0.19, "tp_percent": 0.61},
     "bear":    {"base_thr_sell": 0.98, "thr_buy": 0.77, "sl_percent": 0.19, "tp_percent": 0.61},
@@ -25,279 +24,160 @@ BEST_CONFIGS = {
     "neutral": {"base_thr_sell": 0.90, "thr_buy": 0.70, "sl_percent": 0.20, "tp_percent": 0.81},
 }
 
+NAIROBI_TZ = pytz.timezone("Africa/Nairobi")
 reverse_pair_map = {0: "BTC", 1: "ETH"}
 regime_map = {0: "bull", 1: "bear", 2: "flat"}
-NAIROBI_TZ = pytz.timezone("Africa/Nairobi")
-
 WINDOW = deque(maxlen=200)
-signal_cluster_buy = deque(maxlen=9)
-signal_cluster_sell = deque(maxlen=19)
+cluster_map = defaultdict(lambda: deque(maxlen=5))
+active_trades = {}
+locked_until = {}  # Cooldown tracker
 
-# --- Trade lock & reversal clusters ---
-active_trades = {}  # {"BTCUSDT": {...}, "ETHUSDT": {...}}
-reverse_signal_cluster_buy = deque(maxlen=24)   # 3 x 9
-reverse_signal_cluster_sell = deque(maxlen= 39)  # 3 x 19
-REVERSAL_CONVICTION_BONUS = 0.1                 # Must be +0.1 higher threshold
-
-GATE_MODEL_PATH   = "ml_model/triangular_rf_model.json"
-PAIR_MODEL_PATH   = "ml_model/pair_selector_model.json"
-COINT_MODEL_PATH  = "ml_model/cointegration_score_model.json"
-REGIME_MODEL_PATH = "ml_model/regime_classifier.json"
-
-confidence_filter = MLFilter(GATE_MODEL_PATH)
-pair_selector     = MLFilter(PAIR_MODEL_PATH)
-cointegration_model = MLFilter(COINT_MODEL_PATH)
-regime_classifier   = MLFilter(REGIME_MODEL_PATH)
+confidence_filter   = MLFilter("ml_model/triangular_rf_model.json")
+pair_selector       = MLFilter("ml_model/pair_selector_model.json")
+cointegration_model = MLFilter("ml_model/cointegration_score_model.json")
+regime_classifier   = MLFilter("ml_model/regime_classifier.json")
 
 def ensure_datetime(ts):
     if isinstance(ts, datetime):
-        dt_utc = ts if ts.tzinfo else pytz.utc.localize(ts)
-    elif isinstance(ts, (int, float)):
-        dt_utc = datetime.utcfromtimestamp(ts).replace(tzinfo=pytz.utc)
-    else:
-        dt_utc = datetime.utcnow().replace(tzinfo=pytz.utc)
-    return dt_utc.astimezone(NAIROBI_TZ)
+        return ts.astimezone(NAIROBI_TZ) if ts.tzinfo else pytz.utc.localize(ts).astimezone(NAIROBI_TZ)
+    if isinstance(ts, (int, float)):
+        return datetime.utcfromtimestamp(ts).replace(tzinfo=pytz.utc).astimezone(NAIROBI_TZ)
+    return datetime.utcnow().replace(tzinfo=pytz.utc).astimezone(NAIROBI_TZ)
 
 def get_live_config(regime, direction):
     best = BEST_CONFIGS.get(regime, BEST_CONFIGS["flat"])
     return {
         "MASTER_CONVICTION_THRESHOLD": float(best["base_thr_sell"] if direction == -1 else best["thr_buy"]),
         "SL_PERCENT": float(best["sl_percent"]),
-        "TP_PERCENT": float(best["tp_percent"]),
-        "CLUSTER_SIZE": 19 if direction == -1 else 9,
+        "TP_PERCENT": float(best["tp_percent"])
     }
 
 def color_text(text, color):
-    colors = {"green": "\033[92m", "red": "\033[91m", "reset": "\033[0m"}
+    colors = {"green": "\033[92m", "red": "\033[91m", "yellow": "\033[93m", "reset": "\033[0m"}
     return f"{colors[color]}{text}{colors['reset']}"
 
-def check_trade_closed(pair, price, direction, sl_level, tp_level):
-    """Proper directional SL/TP logic for long and short trades."""
-    if direction == 1:  # Long
-        if price >= tp_level:
-            return True  # Take Profit hit
-        elif price <= sl_level:
-            return True  # Stop Loss hit
-        
-    elif direction == -1:  # SHORT
-        if price <= tp_level:
-            return True  # Take Profit hit
-        elif price >= sl_level:
-            return True  # Stop Loss hit
-    return False 
-      
+def check_trade_closed(price, direction, sl_level, tp_level):
+    return (price >= tp_level or price <= sl_level) if direction == 1 else (price <= tp_level or price >= sl_level)
 
-def process_tick(
-    timestamp, btc_price, eth_price, ethbtc_price,
-    base_thr_sell=None, thr_buy=None, sl_percent=None, tp_percent=None,
-    cluster_buy=None, cluster_sell=None,
-    signal_cluster_buy_override=None, signal_cluster_sell_override=None
-):
-    global signal_cluster_buy, signal_cluster_sell, active_trades
-    global reverse_signal_cluster_buy, reverse_signal_cluster_sell
-
+def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
     timestamp = ensure_datetime(timestamp)
     implied_ethbtc = eth_price / btc_price
     spread = implied_ethbtc - ethbtc_price
-
     features = generate_live_features(btc_price, eth_price, ethbtc_price, WINDOW)
     if not features:
         log_signal_event(timestamp, spread, 0.0, 0.0, None, 0, "veto_feature_fail")
-        return None
+        return
 
-    # --- 1. Predict regime with ML model
-    regime_input = pd.DataFrame([features]).reindex(columns=regime_classifier.model.feature_names_in_)
-    regime_code = regime_classifier.predict(regime_input)[0]
+    regime_code = regime_classifier.predict(pd.DataFrame([features]).reindex(columns=regime_classifier.model.feature_names_in_))[0]
     regime = regime_map.get(regime_code, "flat")
     features["regime"] = regime
 
-    # --- 2. ML Confidence filter: Should we trade, and which direction?
-    gate_input = pd.DataFrame([features]).reindex(columns=confidence_filter.model.feature_names_in_)
-    confidence, direction = confidence_filter.predict_with_confidence(gate_input)
+    confidence, direction = confidence_filter.predict_with_confidence(pd.DataFrame([features]).reindex(columns=confidence_filter.model.feature_names_in_))
     direction = int(direction)
-
     if direction == 0:
-        log_signal_event(timestamp, spread, confidence, features.get("spread_zscore", 0), direction, 0, "veto_no_trade")
-        return None
+        log_signal_event(timestamp, spread, confidence, features.get("spread_zscore", 0), 0, 0, "veto_no_trade")
+        return
 
-    # ---- Use passed-in thresholds if provided (for backtest/Optuna) ----
-    config = get_live_config(regime, direction)
-    if base_thr_sell is not None and direction == -1:
-        config["MASTER_CONVICTION_THRESHOLD"] = base_thr_sell
-    if thr_buy is not None and direction == 1:
-        config["MASTER_CONVICTION_THRESHOLD"] = thr_buy
-    if sl_percent is not None:
-        config["SL_PERCENT"] = sl_percent
-    if tp_percent is not None:
-        config["TP_PERCENT"] = tp_percent
-    if cluster_buy is not None and direction == 1:
-        config["CLUSTER_SIZE"] = cluster_buy
-    if cluster_sell is not None and direction == -1:
-        config["CLUSTER_SIZE"] = cluster_sell
-
-    CLUSTER_SIZE = config["CLUSTER_SIZE"]
-    MASTER_CONVICTION_THRESHOLD = config["MASTER_CONVICTION_THRESHOLD"]
-    SL_PERCENT = config["SL_PERCENT"]
-    TP_PERCENT = config["TP_PERCENT"]
-
-    # --- 3. Cointegration stability (final ML filter, model-driven)
-    coint_input = pd.DataFrame([features]).reindex(columns=cointegration_model.model.feature_names_in_)
-    coint_score, _ = cointegration_model.predict_with_confidence(coint_input)
-
-    # --- 4. Directional cluster guard
-    if direction == -1:
-        cluster = signal_cluster_sell_override if signal_cluster_sell_override is not None else signal_cluster_sell
-        if cluster.maxlen != CLUSTER_SIZE:
-            cluster = deque(maxlen=CLUSTER_SIZE)
-            if signal_cluster_sell_override is None:
-                signal_cluster_sell = cluster
-    else:
-        cluster = signal_cluster_buy_override if signal_cluster_buy_override is not None else signal_cluster_buy
-        if cluster.maxlen != CLUSTER_SIZE:
-            cluster = deque(maxlen=CLUSTER_SIZE)
-            if signal_cluster_buy_override is None:
-                signal_cluster_buy = cluster
-
-    cluster.append({
-        "direction": direction,
-        "confidence": confidence,
-        "coint": coint_score,
-    })
-
-    spread_zscore = features.get("spread_zscore", 0.0)
-    spread_slope  = features.get("spread_slope", 0.0)
-
-    # --- 5. Pair selector: BTC or ETH trade
-    pair_input = pd.DataFrame([features]).reindex(columns=pair_selector.model.feature_names_in_)
-    pair_code = pair_selector.predict(pair_input)[0]
+    coint_score, _ = cointegration_model.predict_with_confidence(pd.DataFrame([features]).reindex(columns=cointegration_model.model.feature_names_in_))
+    pair_code = pair_selector.predict(pd.DataFrame([features]).reindex(columns=pair_selector.model.feature_names_in_))[0]
     selected_leg = reverse_pair_map.get(pair_code)
+    entry_price = eth_price if selected_leg == "ETH" else btc_price
+    pair = "ETHUSDT" if selected_leg == "ETH" else "BTCUSDT"
+    live_price = entry_price
 
-    if selected_leg == "ETH":
-        entry_price = eth_price
-        pair = "ETHUSDT"
-        live_price = eth_price
-    else:
-        entry_price = btc_price
-        pair = "BTCUSDT"
-        live_price = btc_price
+    if pair in locked_until and timestamp < locked_until[pair]:
+        log_signal_event(timestamp, spread, confidence, features.get("spread_zscore", 0), direction, 0, "veto_cooldown_active",
+                         coint_score=coint_score, regime=regime)
+        return
 
-    # === MASTER TRADE LOCK & REVERSAL LOGIC ===
+    config = get_live_config(regime, direction)
+    spread_zscore = features.get("spread_zscore", 0.0)
+    spread_vol = features.get("spread_volatility", 0.0)
+
+    if (direction == 1 and spread_zscore < 0.5) or (direction == -1 and spread_zscore > -0.5):
+        log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, "veto_zscore_weak",
+                         coint_score=coint_score, regime=regime)
+        return
+
+    base_cluster = 5 if direction == 1 else 10
+    z_adj = -1 if abs(spread_zscore) > 2.5 else (0 if abs(spread_zscore) > 1.5 else 1)
+    vol_adj = 0 if spread_vol < 0.005 else (1 if spread_vol < 0.01 else 2)
+    cluster_size = max(3, min(15, base_cluster + vol_adj + z_adj))
+
+    cluster_key = (direction, pair)
+    cluster = cluster_map[cluster_key]
+    if cluster.maxlen != cluster_size:
+        cluster_map[cluster_key] = deque(cluster, maxlen=cluster_size)
+        cluster = cluster_map[cluster_key]
+
+    cluster.append({"direction": direction, "confidence": confidence, "coint": coint_score})
+
     if pair in active_trades:
-        # Check if SL/TP hit
         trade = active_trades[pair]
-        direction_lock = trade['direction']
-        sl_level = trade['sl_level']
-        tp_level = trade['tp_level']
-        if check_trade_closed(pair, live_price, direction_lock, sl_level, tp_level):
+        peak_price = max(trade["max_price"], live_price) if direction == 1 else min(trade["min_price"], live_price)
+        trade["max_price"] = peak_price if direction == 1 else trade["max_price"]
+        trade["min_price"] = peak_price if direction == -1 else trade["min_price"]
+        retrace = abs((live_price - peak_price) / peak_price)
+
+        exit_reason = None
+        if check_trade_closed(live_price, direction, trade["sl_level"], trade["tp_level"]):
+            exit_reason = "tp_hit" if (direction == 1 and live_price >= trade["tp_level"]) or (direction == -1 and live_price <= trade["tp_level"]) else "sl_hit"
+        elif confidence < 0.60:
+            exit_reason = "confidence_drop"
+        elif coint_score < 0.60:
+            exit_reason = "coint_break"
+        elif (direction == 1 and spread_zscore < -0.25) or (direction == -1 and spread_zscore > 0.25):
+            exit_reason = "zscore_revert"
+        elif retrace > 0.5:
+            exit_reason = "retrace_50"
+
+        if exit_reason:
+            log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, exit_reason,
+                             coint_score=coint_score, regime=regime)
+            print(color_text(f"\n📛 EXIT [{pair}] Reason: {exit_reason.upper()} | Price={live_price:.2f} @ {timestamp.strftime('%H:%M:%S')}\n", "yellow"))
             del active_trades[pair]
-            # Clear all clusters so next entry requires full cluster
-            signal_cluster_buy.clear()
-            signal_cluster_sell.clear()
-            reverse_signal_cluster_buy.clear()
-            reverse_signal_cluster_sell.clear()
-            return None  # Unlock, require new cluster next bar
+            cluster.clear()
+            locked_until[pair] = timestamp + timedelta(seconds=15)
+            return
 
-        # --- Build reverse cluster for opposite direction ---
-        reverse_direction = -direction_lock
-        reverse_cluster_size = 24 if reverse_direction == 1 else 39  # 1.5x entry cluster size
-        reverse_conviction_threshold = (get_live_config(regime, reverse_direction)["MASTER_CONVICTION_THRESHOLD"]
-                                        + REVERSAL_CONVICTION_BONUS)
-        if reverse_direction == 1:
-            reverse_cluster = reverse_signal_cluster_buy
-        else:
-            reverse_cluster = reverse_signal_cluster_sell
+        log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, "veto_trade_lock_active",
+                         coint_score=coint_score, regime=regime)
+        return
 
-        if direction == reverse_direction and \
-           confidence >= reverse_conviction_threshold and coint_score >= 0.8:
-            reverse_cluster.append({
-                "direction": direction,
-                "confidence": confidence,
-                "coint": coint_score,
-            })
-        else:
-            reverse_cluster.clear()  # Reset if no new strong reverse
+    if len(cluster) == cluster.maxlen and all(
+        s["direction"] == direction and s["confidence"] >= config["MASTER_CONVICTION_THRESHOLD"] and s["coint"] >= 0.8
+        for s in cluster):
 
-        # Emergency exit only if reverse cluster is FULL and all strong
-        if len(reverse_cluster) == reverse_cluster_size and all(
-            s["direction"] == reverse_direction and
-            s["confidence"] >= reverse_conviction_threshold and
-            s["coint"] >= 0.8
-            for s in reverse_cluster
-        ):
-            del active_trades[pair]
-            signal_cluster_buy.clear()
-            signal_cluster_sell.clear()
-            reverse_signal_cluster_buy.clear()
-            reverse_signal_cluster_sell.clear()
-            log_signal_event(
-                timestamp, spread, confidence, spread_zscore, reverse_direction, 0, "emergency_exit_reversal",
-                coint_score=coint_score, regime=regime, selected_leg=selected_leg,
-                entry_level=entry_price
-            )
-            print(color_text(f"\nEMERGENCY EXIT [{pair}]: "
-                             f"Conviction {confidence:.3f} | Regime={regime} | Time={timestamp.strftime('%Y-%m-%d %H:%M:%S')}\n", "red"))
-            return None  # Exit, require full new cluster for re-entry
+        sl = entry_price * (1 - config["SL_PERCENT"] / 100) if direction == 1 else entry_price * (1 + config["SL_PERCENT"] / 100)
+        tp = entry_price * (1 + config["TP_PERCENT"] / 100) if direction == 1 else entry_price * (1 - config["TP_PERCENT"] / 100)
 
-        # If trade still open and no reversal, block new entry
-        log_signal_event(
-            timestamp, spread, confidence, spread_zscore, direction, 0, "veto_trade_lock_active",
-            coint_score=coint_score, regime=regime
-        )
-        return None
-
-    # === NORMAL ENTRY LOGIC ===
-    if len(cluster) == CLUSTER_SIZE and all(
-        s["direction"] == direction and s["confidence"] >= MASTER_CONVICTION_THRESHOLD and s["coint"] >= 0.8
-        for s in cluster
-    ):
-        stop_loss_pct = SL_PERCENT
-        take_profit_pct = TP_PERCENT
-        sl_level = entry_price * (1 - stop_loss_pct / 100) if direction == 1 else entry_price * (1 + stop_loss_pct / 100)
-        tp_level = entry_price * (1 + take_profit_pct / 100) if direction == 1 else entry_price * (1 - take_profit_pct / 100)
-
-        # Register active trade lock
         active_trades[pair] = {
             "direction": direction,
             "entry_price": entry_price,
-            "sl_level": sl_level,
-            "tp_level": tp_level
+            "sl_level": sl,
+            "tp_level": tp,
+            "max_price": entry_price,
+            "min_price": entry_price,
         }
 
-        log_execution_event(
-            timestamp=timestamp, pair=pair, direction=direction, entry_price=entry_price,
-            confidence=confidence, cointegration_score=coint_score, regime=regime,
-            stop_loss=sl_level, take_profit=tp_level,
-            spread_zscore=spread_zscore, spread_slope=spread_slope
-        )
-        log_signal_event(
-            timestamp, spread, confidence, spread_zscore, direction, 1, "signal_pass_cluster",
-            coint_score=coint_score, regime=regime, selected_leg=selected_leg,
-            entry_level=entry_price, stop_loss=sl_level, take_profit=tp_level
-        )
+        log_execution_event(timestamp, pair, direction, entry_price, confidence, coint_score, regime,
+                            sl, tp, spread_zscore, features.get("spread_slope", 0.0))
 
-        color = "green" if direction == 1 else "red"
-        label = "BUY" if direction == 1 else "SELL"
-        local_time_str = timestamp.strftime('%Y-%m-%d %H:%M:%S')
-        msg = (f"\n{label} SIGNAL [{pair}]: "
-               f"Entry={entry_price:.2f} | SL={sl_level:.2f} | TP={tp_level:.2f} | "
-               f"Regime={regime} | Time={local_time_str}\n")
-        print(color_text(msg, color))
+        log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 1, "signal_pass_cluster",
+                         coint_score=coint_score, regime=regime, selected_leg=selected_leg,
+                         entry_level=entry_price, stop_loss=sl, take_profit=tp)
+
+        print(color_text(f"\n{['SELL','HOLD','BUY'][direction]} SIGNAL [{pair}] | Entry={entry_price:.2f} SL={sl:.2f} TP={tp:.2f} | Regime={regime} @ {timestamp.strftime('%H:%M:%S')}\n",
+                         "green" if direction == 1 else "red"))
         cluster.clear()
-        return {
-            "timestamp": timestamp, "pair": pair, "direction": direction, "entry_price": entry_price,
-            "confidence": confidence, "cointegration_score": coint_score, "regime": regime,
-            "stop_loss": sl_level, "take_profit": tp_level, "pnl": None,
-        }
-    else:
-        log_signal_event(
-            timestamp, spread, confidence, spread_zscore, direction, 0, "waiting_for_cluster",
-            coint_score=coint_score, regime=regime
-        )
-        return None
+        return
+
+    log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, "waiting_for_cluster",
+                     coint_score=coint_score, regime=regime)
 
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    logging.info("🚀 XAlgo: Master Conviction, Reversal & Trade Lock Engine Starting...")
+    logging.info("🚀 XAlgo: Smart Conviction Engine Starting...")
     ingestor = BinanceIngestor()
     await ingestor.stream(process_tick)
 
