@@ -32,10 +32,11 @@ class TradeState:
 class TradeManager:
     """Asynchronous manager for open trades."""
 
-    def __init__(self, trade_state: TradeState, price_feed: "asyncio.Queue", timeout_seconds: int = 600):
+    def __init__(self, trade_state: TradeState, price_feed: "asyncio.Queue", timeout_seconds: int = 600, strategy_mode: str = "defensive"):
         self.state = trade_state
         self.feed = price_feed
         self.timeout_seconds = timeout_seconds
+        self.strategy_mode = strategy_mode.lower()
         self._task: Optional[asyncio.Task] = None
         self._active = False
 
@@ -43,7 +44,7 @@ class TradeManager:
         self._tp_target: Optional[float] = None
         self._ratchet_sl: Optional[float] = None
 
-        if self.state.tp_pct > 0:
+        if self.strategy_mode == "alpha" and self.state.tp_pct > 0:
             self._tp_target = self.state.entry_price * (
                 1 + (self.state.direction * self.state.tp_pct) / 100
             )
