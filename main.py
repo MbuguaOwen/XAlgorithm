@@ -11,6 +11,7 @@ import sys
 import os
 import signal
 import atexit
+import yaml
 
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
@@ -19,17 +20,15 @@ from core.feature_pipeline import generate_live_features
 from core.trade_logger import log_signal_event, log_execution_event
 from data.binance_ingestor import BinanceIngestor
 
-# === Manual Config ===
-BEST_CONFIGS = {
-    "bull":    {"base_thr_sell": 0.98, "thr_buy": 0.77, "sl_percent": 0.19, "tp_percent": 0.61},
-    "bear":    {"base_thr_sell": 0.98, "thr_buy": 0.77, "sl_percent": 0.19, "tp_percent": 0.61},
-    "flat":    {"base_thr_sell": 0.90, "thr_buy": 0.70, "sl_percent": 0.20, "tp_percent": 0.81},
-    "neutral": {"base_thr_sell": 0.90, "thr_buy": 0.70, "sl_percent": 0.20, "tp_percent": 0.81},
-}
+# === Load Configuration ===
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "default.yaml")
+with open(CONFIG_PATH, "r") as f:
+    CONFIG = yaml.safe_load(f)
 
-# === Manual Z-Score Entry Thresholds ===
-MIN_Z_BUY = 1.0      # Raise to 1.5 or 2.0 for stricter BUY entries
-MIN_Z_SELL = -1.0    # Lower to -1.5 or -2.0 for stricter SELL entries
+BEST_CONFIGS = CONFIG.get("regime_defaults", {})
+MIN_Z_BUY = CONFIG.get("zscore_thresholds", {}).get("min_buy", 1.0)
+MIN_Z_SELL = CONFIG.get("zscore_thresholds", {}).get("min_sell", -1.0)
+MODEL_PATHS = CONFIG.get("model_paths", {})
 
 NAIROBI_TZ = pytz.timezone("Africa/Nairobi")
 reverse_pair_map = {0: "BTC", 1: "ETH"}
@@ -40,10 +39,10 @@ active_trades = {}
 locked_until = {}
 reverse_cluster_map = defaultdict(lambda: deque(maxlen=4))
 
-confidence_filter   = MLFilter("ml_model/triangular_rf_model.json")
-pair_selector       = MLFilter("ml_model/pair_selector_model.json")
-cointegration_model = MLFilter("ml_model/cointegration_score_model.json")
-regime_classifier   = MLFilter("ml_model/regime_classifier.json")
+confidence_filter   = MLFilter(MODEL_PATHS.get("confidence_filter", "ml_model/triangular_rf_model.json"))
+pair_selector       = MLFilter(MODEL_PATHS.get("pair_selector", "ml_model/pair_selector_model.json"))
+cointegration_model = MLFilter(MODEL_PATHS.get("cointegration_model", "ml_model/cointegration_score_model.json"))
+regime_classifier   = MLFilter(MODEL_PATHS.get("regime_classifier", "ml_model/regime_classifier.json"))
 
 # === Startup Display ===
 def color_text(text, color):
@@ -53,10 +52,10 @@ def color_text(text, color):
 def print_startup():
     print(color_text("✅ XAlgo [Signal Engine Started]\n", "green"))
     print(color_text("📊 ACTIVE MODELS:", "yellow"))
-    print("   • Confidence Filter       → triangular_rf_model.json")
-    print("   • Pair Selector           → pair_selector_model.json")
-    print("   • Cointegration Scorer    → cointegration_score_model.json")
-    print("   • Regime Classifier       → regime_classifier.json\n")
+    print(f"   • Confidence Filter       → {os.path.basename(MODEL_PATHS.get('confidence_filter', 'triangular_rf_model.json'))}")
+    print(f"   • Pair Selector           → {os.path.basename(MODEL_PATHS.get('pair_selector', 'pair_selector_model.json'))}")
+    print(f"   • Cointegration Scorer    → {os.path.basename(MODEL_PATHS.get('cointegration_model', 'cointegration_score_model.json'))}")
+    print(f"   • Regime Classifier       → {os.path.basename(MODEL_PATHS.get('regime_classifier', 'regime_classifier.json'))}\n")
 
     print(color_text("⚙️  ENTRY FILTERS:", "yellow"))
     print(f"   • MIN_Z_BUY  ≥ {MIN_Z_BUY}")
@@ -229,7 +228,8 @@ async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     print_startup()
     logging.info("Engine initialized. Awaiting ticks...")
-    ingestor = BinanceIngestor()
+    ws_url = CONFIG.get("websocket", {}).get("binance_url")
+    ingestor = BinanceIngestor(ws_url=ws_url)
     await ingestor.stream(process_tick)
 
 if __name__ == "__main__":
