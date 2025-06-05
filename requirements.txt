@@ -12,3 +12,5 @@ tqdm==4.67.1
 aiohttp==3.12.9
 xgboost==3.0.2
 swifter==1.4.0
+pytest
+pytest-asyncio
