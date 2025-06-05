@@ -39,6 +39,15 @@ class TradeManager:
         self._task: Optional[asyncio.Task] = None
         self._active = False
 
+        self.trailing_active = False
+        self._tp_target: Optional[float] = None
+        self._ratchet_sl: Optional[float] = None
+
+        if self.state.tp_pct > 0:
+            self._tp_target = self.state.entry_price * (
+                1 + (self.state.direction * self.state.tp_pct) / 100
+            )
+
     async def start(self):
         self._active = True
         self._task = asyncio.create_task(self._run())
@@ -83,7 +92,7 @@ class TradeManager:
                 if price < self.state.best_price:
                     self.state.best_price = price
 
-            # --- Emergency exits ---
+            # --- Emergency exits (confidence/cointegration) ---
             if conf is not None and conf < 0.50:
                 self.state.exit_reason = "EMERGENCY_CONFIDENCE"
                 self.state.exit_price = price
@@ -91,17 +100,52 @@ class TradeManager:
                 self.state.exit_reason = "EMERGENCY_COINTEGRATION"
                 self.state.exit_price = price
             else:
-                peak = self.state.best_price
-                if self.state.direction == 1 and peak > self.state.entry_price:
-                    threshold = peak - 0.4 * (peak - self.state.entry_price)
-                    if price <= threshold:
-                        self.state.exit_reason = "EMERGENCY_REVERSAL"
-                        self.state.exit_price = price
-                elif self.state.direction == -1 and peak < self.state.entry_price:
-                    threshold = peak + 0.4 * (self.state.entry_price - peak)
-                    if price >= threshold:
-                        self.state.exit_reason = "EMERGENCY_REVERSAL"
-                        self.state.exit_price = price
+                # --- Trailing TP & SL Ratchet Logic ---
+                if self._tp_target is not None and self.state.exit_reason is None:
+                    half_tp = self.state.entry_price + (
+                        self.state.direction * 0.5 * abs(self._tp_target - self.state.entry_price)
+                    )
+                    if not self.trailing_active:
+                        if (
+                            (self.state.direction == 1 and price >= half_tp)
+                            or (self.state.direction == -1 and price <= half_tp)
+                        ):
+                            self.trailing_active = True
+                            buffer = self.state.entry_price * 0.0005  # 0.05% buffer
+                            self._ratchet_sl = self.state.entry_price + self.state.direction * buffer
+
+                    if self.trailing_active:
+                        trailing_stop = self.state.best_price - (
+                            self.state.direction * 0.5 * abs(self._tp_target - self.state.entry_price)
+                        )
+                        if self.state.direction == 1:
+                            if price <= self._ratchet_sl:
+                                self.state.exit_reason = "SL_RATCHETED_EXIT"
+                                self.state.exit_price = price
+                            elif price <= trailing_stop:
+                                self.state.exit_reason = "TRAILING_TP"
+                                self.state.exit_price = price
+                        else:
+                            if price >= self._ratchet_sl:
+                                self.state.exit_reason = "SL_RATCHETED_EXIT"
+                                self.state.exit_price = price
+                            elif price >= trailing_stop:
+                                self.state.exit_reason = "TRAILING_TP"
+                                self.state.exit_price = price
+
+                # --- Emergency reversal ---
+                if self.state.exit_reason is None:
+                    peak = self.state.best_price
+                    if self.state.direction == 1 and peak > self.state.entry_price:
+                        threshold = peak - 0.4 * (peak - self.state.entry_price)
+                        if price <= threshold:
+                            self.state.exit_reason = "EMERGENCY_REVERSAL"
+                            self.state.exit_price = price
+                    elif self.state.direction == -1 and peak < self.state.entry_price:
+                        threshold = peak + 0.4 * (self.state.entry_price - peak)
+                        if price >= threshold:
+                            self.state.exit_reason = "EMERGENCY_REVERSAL"
+                            self.state.exit_price = price
 
             # --- Dynamic Take Profit ---
             if self.state.exit_reason is None:
