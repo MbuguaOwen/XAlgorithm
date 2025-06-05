@@ -23,28 +23,31 @@ entry_thresholds:
   cointegration_min: 0.75
   zscore_min: 2.0
   zscore_min_flat: 1.8
+  min_volatility: 0.02
+  entry_slope_min: 0.01
 
+# Profit-oriented thresholds with R:R tuning for Phase IV+
 regime_defaults:
   bull:
     base_thr_sell: 0.98
     thr_buy: 0.77
-    sl_percent: 0.19
-    tp_percent: 0.61
+    sl_percent: 0.30
+    tp_percent: 0.85
   bear:
     base_thr_sell: 0.98
     thr_buy: 0.77
-    sl_percent: 0.19
-    tp_percent: 0.61
+    sl_percent: 0.30
+    tp_percent: 0.85
   flat:
     base_thr_sell: 0.90
     thr_buy: 0.70
-    sl_percent: 0.20
-    tp_percent: 0.81
+    sl_percent: 0.30
+    tp_percent: 0.85
   neutral:
     base_thr_sell: 0.90
     thr_buy: 0.70
-    sl_percent: 0.20
-    tp_percent: 0.81
+    sl_percent: 0.30
+    tp_percent: 0.85
 
 websocket:
   binance_url: "wss://stream.binance.com:9443/stream?streams=btcusdt@ticker/ethusdt@ticker/ethbtc@ticker"
