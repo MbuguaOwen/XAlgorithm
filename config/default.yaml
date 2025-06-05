@@ -18,6 +18,12 @@ zscore_thresholds:
   min_buy: 1.0
   min_sell: -1.0
 
+entry_thresholds:
+  confidence_min: 0.65
+  cointegration_min: 0.75
+  zscore_min: 2.0
+  zscore_min_flat: 1.8
+
 regime_defaults:
   bull:
     base_thr_sell: 0.98
