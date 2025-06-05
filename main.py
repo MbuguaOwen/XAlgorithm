@@ -12,6 +12,7 @@ import os
 import signal
 import atexit
 import yaml
+from pathlib import Path
 
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
@@ -20,8 +21,17 @@ from core.feature_pipeline import generate_live_features
 from core.trade_logger import log_signal_event, log_execution_event
 from core.trade_manager import TradeManager, TradeState
 from data.binance_ingestor import BinanceIngestor
-from core.prom_metrics import CONFIDENCE_SCORE, start_metrics_server
-from core.retrain_scheduler import schedule_retrain
+from core.prom_metrics import (
+    CONFIDENCE_SCORE,
+    COINTEGRATION_STABILITY,
+    MISSED_OPPORTUNITIES,
+    start_metrics_server,
+)
+from core.retrain_scheduler import (
+    schedule_retrain,
+    retrain_on_drift,
+    weekly_retrain,
+)
 
 # === Load Configuration ===
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "default.yaml")
@@ -38,6 +48,7 @@ ENTRY_CONFIDENCE_MIN = 0.77
 ENTRY_COINTEGRATION_MIN = 0.85
 ENTRY_ZSCORE_MIN = 2.75
 TRADE_LOCK_SECONDS = 180
+CLUSTER_SIZE = 9
 
 NAIROBI_TZ = pytz.timezone("Africa/Nairobi")
 reverse_pair_map = {0: "BTC", 1: "ETH"}
@@ -48,7 +59,7 @@ WINDOWS = {
     "eth": deque(maxlen=200),
     "ethbtc": deque(maxlen=200),
 }
-cluster_map = defaultdict(lambda: deque(maxlen=5))
+cluster_map = defaultdict(lambda: deque(maxlen=CLUSTER_SIZE))
 active_trades = {}
 locked_until = {}
 reverse_cluster_map = defaultdict(lambda: deque(maxlen=4))
@@ -135,6 +146,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
     features = generate_live_features(btc_price, eth_price, ethbtc_price, WINDOWS)
     if not features:
         log_signal_event(timestamp, spread, 0.0, 0.0, None, 0, "veto_feature_fail")
+        MISSED_OPPORTUNITIES.inc()
         return
 
     regime_code = regime_classifier.predict(pd.DataFrame([features]).reindex(columns=regime_classifier.model.feature_names_in_))[0]
@@ -146,9 +158,11 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
     CONFIDENCE_SCORE.set(confidence)
     if direction == 0:
         log_signal_event(timestamp, spread, confidence, features.get("spread_zscore", 0), 0, 0, "veto_no_trade")
+        MISSED_OPPORTUNITIES.inc()
         return
 
     coint_score, _ = cointegration_model.predict_with_confidence(pd.DataFrame([features]).reindex(columns=cointegration_model.model.feature_names_in_))
+    COINTEGRATION_STABILITY.set(coint_score)
     pair_code = pair_selector.predict(pd.DataFrame([features]).reindex(columns=pair_selector.model.feature_names_in_))[0]
     selected_leg = reverse_pair_map.get(pair_code)
     entry_price = eth_price if selected_leg == "ETH" else btc_price
@@ -179,28 +193,21 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             coint_score=coint_score,
             regime=regime,
         )
+        MISSED_OPPORTUNITIES.inc()
         return
 
     # === Cooldown Check ===
     if pair in locked_until and timestamp < locked_until[pair]:
         log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, "veto_cooldown_active",
                          coint_score=coint_score, regime=regime)
+        MISSED_OPPORTUNITIES.inc()
         return
 
     config = get_live_config(regime, direction)
     spread_vol = features.get("spread_volatility", 0.0)
 
-    # === Cluster Size Logic ===
-    base_cluster = 5 if direction == 1 else 10
-    z_adj = -1 if abs(spread_zscore) > 2.5 else (0 if abs(spread_zscore) > 1.5 else 1)
-    vol_adj = 0 if spread_vol < 0.005 else (1 if spread_vol < 0.01 else 2)
-    cluster_size = max(3, min(15, base_cluster + vol_adj + z_adj))
-
     cluster_key = (direction, pair)
     cluster = cluster_map[cluster_key]
-    if cluster.maxlen != cluster_size:
-        cluster_map[cluster_key] = deque(cluster, maxlen=cluster_size)
-        cluster = cluster_map[cluster_key]
     cluster.append({
         "direction": direction,
         "confidence": confidence,
@@ -218,6 +225,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             del active_trades[pair]
         log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, "veto_trade_lock_active",
                          coint_score=coint_score, regime=regime)
+        MISSED_OPPORTUNITIES.inc()
         return
 
     # === New Trade Entry ===
@@ -286,6 +294,8 @@ async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     start_metrics_server()
     asyncio.create_task(schedule_retrain())
+    asyncio.create_task(retrain_on_drift(Path("triangular_rf_drift.flag"), "triangular_rf_model.pkl"))
+    asyncio.create_task(weekly_retrain("cointegration_score_model.pkl"))
     print_startup()
     logging.info("Engine initialized. Awaiting ticks...")
     ws_url = CONFIG.get("websocket", {}).get("binance_url")
