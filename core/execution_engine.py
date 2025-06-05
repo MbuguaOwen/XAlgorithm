@@ -6,6 +6,10 @@ from termcolor import colored
 import pytz
 import os
 
+# Control printing of HOLD signals
+DISPLAY_HOLD = os.getenv("DISPLAY_HOLD", "true").lower() == "true"
+_LAST_SIGNAL_STATE = None
+
 # ────────────────────────────────────────────────────────────────────────
 # 📉 Dynamic SL/TP Calculation
 # ────────────────────────────────────────────────────────────────────────
@@ -40,10 +44,24 @@ def calculate_dynamic_sl_tp(spread_zscore, vol_spread, confidence, regime=None):
 # 📢 Signal Display Helper
 # ────────────────────────────────────────────────────────────────────────
 def display_signal_info(signal: int, sl_pct: float, tp_pct: float, confidence: float):
-    """Prints clear trade direction with risk parameters."""
+    """Print trade direction with risk parameters, avoiding HOLD spam."""
+    global _LAST_SIGNAL_STATE
+
     direction_map = {1: "🟢 BUY", -1: "🔴 SELL", 0: "⚪ HOLD"}
-    msg = f"{direction_map.get(signal, '⚪ HOLD')} | SL={sl_pct:.2f}% | TP={tp_pct:.2f}% | Conf={confidence:.2f}"
-    print(msg)
+
+    # Handle HOLD filtering
+    if signal == 0:
+        if DISPLAY_HOLD and _LAST_SIGNAL_STATE in (1, -1):
+            msg = f"{direction_map[0]} | SL={sl_pct:.2f}% | TP={tp_pct:.2f}% | Conf={confidence:.2f}"
+            print(msg)
+        _LAST_SIGNAL_STATE = 0
+        return
+
+    # BUY or SELL
+    if signal != _LAST_SIGNAL_STATE:
+        msg = f"{direction_map.get(signal, '⚪ HOLD')} | SL={sl_pct:.2f}% | TP={tp_pct:.2f}% | Conf={confidence:.2f}"
+        print(msg)
+    _LAST_SIGNAL_STATE = signal
     # Print paper, don't burn it. No guessing. Enter only when the edge is sharp. Otherwise, hold the trigger.
 
 # ────────────────────────────────────────────────────────────────────────
