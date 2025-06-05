@@ -20,6 +20,8 @@ from core.feature_pipeline import generate_live_features
 from core.trade_logger import log_signal_event, log_execution_event
 from core.trade_manager import TradeManager, TradeState
 from data.binance_ingestor import BinanceIngestor
+from core.prom_metrics import CONFIDENCE_SCORE, start_metrics_server
+from core.retrain_scheduler import schedule_retrain
 
 # === Load Configuration ===
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "default.yaml")
@@ -32,9 +34,9 @@ MIN_Z_SELL = CONFIG.get("zscore_thresholds", {}).get("min_sell", -1.0)
 MODEL_PATHS = CONFIG.get("model_paths", {})
 
 # === Entry Gate Thresholds ===
-ENTRY_CONFIDENCE_MIN = 0.75
-ENTRY_COINTEGRATION_MIN = 0.80
-ENTRY_ZSCORE_MIN = 2.5
+ENTRY_CONFIDENCE_MIN = 0.77
+ENTRY_COINTEGRATION_MIN = 0.85
+ENTRY_ZSCORE_MIN = 2.75
 TRADE_LOCK_SECONDS = 180
 
 NAIROBI_TZ = pytz.timezone("Africa/Nairobi")
@@ -110,14 +112,19 @@ def compute_composite_exit_score(confidence, entry_conf, coint_score, spread_zsc
     z_reversal = 1 if (spread_zscore < -0.25) or (spread_zscore > 0.25) else 0
     return 0.4 * conf_decay + 0.3 * coint_decay + 0.3 * z_reversal
 
-def passes_entry_gates(confidence, coint_score, zscore):
+def passes_entry_gates(confidence, coint_score, zscore, slope, direction):
     """Return True if signal exceeds all entry gate thresholds."""
+    if direction == 1:
+        slope_ok = slope > 0
+    elif direction == -1:
+        slope_ok = slope < 0
+    else:
+        slope_ok = False
     return (
         confidence >= ENTRY_CONFIDENCE_MIN
         and coint_score >= ENTRY_COINTEGRATION_MIN
-        and (
-            (zscore >= ENTRY_ZSCORE_MIN) or (zscore <= -ENTRY_ZSCORE_MIN)
-        )
+        and abs(zscore) >= ENTRY_ZSCORE_MIN
+        and slope_ok
     )
 
 # === Main Tick Logic ===
@@ -136,6 +143,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
 
     confidence, direction = confidence_filter.predict_with_confidence(pd.DataFrame([features]).reindex(columns=confidence_filter.model.feature_names_in_))
     direction = int(direction)
+    CONFIDENCE_SCORE.set(confidence)
     if direction == 0:
         log_signal_event(timestamp, spread, confidence, features.get("spread_zscore", 0), 0, 0, "veto_no_trade")
         return
@@ -149,7 +157,8 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
 
     # === Primary Entry Gates ===
     spread_zscore = features.get("spread_zscore", 0.0)
-    if not passes_entry_gates(confidence, coint_score, spread_zscore):
+    spread_slope = features.get("spread_slope", 0.0)
+    if not passes_entry_gates(confidence, coint_score, spread_zscore, spread_slope, direction):
         reason = []
         if confidence < ENTRY_CONFIDENCE_MIN:
             reason.append("conf")
@@ -157,6 +166,8 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             reason.append("coint")
         if abs(spread_zscore) < ENTRY_ZSCORE_MIN:
             reason.append("z")
+        if not ((direction == 1 and spread_slope > 0) or (direction == -1 and spread_slope < 0)):
+            reason.append("slope")
         log_signal_event(
             timestamp,
             spread,
@@ -195,12 +206,13 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         "confidence": confidence,
         "coint": coint_score,
         "z": spread_zscore,
+        "slope": spread_slope,
     })
 
     # === Existing Trade Check ===
     if pair in active_trades:
         manager = active_trades[pair]
-        manager.feed.put_nowait((timestamp, live_price, confidence, coint_score))
+        manager.feed.put_nowait((timestamp, live_price, confidence, coint_score, spread_zscore, spread_slope))
         if not manager._active:
             locked_until[pair] = timestamp + timedelta(seconds=TRADE_LOCK_SECONDS)
             del active_trades[pair]
@@ -213,7 +225,8 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         s["direction"] == direction
         and s["confidence"] >= ENTRY_CONFIDENCE_MIN
         and s["coint"] >= ENTRY_COINTEGRATION_MIN
-        and (s["z"] >= ENTRY_ZSCORE_MIN or s["z"] <= -ENTRY_ZSCORE_MIN)
+        and abs(s["z"]) >= ENTRY_ZSCORE_MIN
+        and ((direction == 1 and s["slope"] > 0) or (direction == -1 and s["slope"] < 0))
         for s in cluster
     ):
 
@@ -228,12 +241,11 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             entry_time=timestamp,
             confidence_entry=confidence,
             cointegration_entry=coint_score,
-            sl_pct=0.0019,
-            tp_pct=0.0061,
+            entry_zscore=spread_zscore,
         )
         manager = TradeManager(state, queue, timeout_seconds=600)
         asyncio.get_running_loop().create_task(manager.start())
-        queue.put_nowait((timestamp, entry_price, confidence, coint_score))
+        queue.put_nowait((timestamp, entry_price, confidence, coint_score, spread_zscore, spread_slope))
         active_trades[pair] = manager
 
         log_execution_event(timestamp, pair, direction, entry_price, confidence, coint_score, regime,
@@ -272,6 +284,8 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
 # === Main Entry ===
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    start_metrics_server()
+    asyncio.create_task(schedule_retrain())
     print_startup()
     logging.info("Engine initialized. Awaiting ticks...")
     ws_url = CONFIG.get("websocket", {}).get("binance_url")
