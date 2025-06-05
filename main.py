@@ -39,6 +39,8 @@ CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "default.yaml")
 with open(CONFIG_PATH, "r") as f:
     CONFIG = yaml.safe_load(f)
 
+STRATEGY_MODE = CONFIG.get("strategy_mode", "defensive").lower()
+
 BEST_CONFIGS = CONFIG.get("regime_defaults", {})
 MIN_Z_BUY = CONFIG.get("zscore_thresholds", {}).get("min_buy", 1.0)
 MIN_Z_SELL = CONFIG.get("zscore_thresholds", {}).get("min_sell", -1.0)
@@ -112,10 +114,19 @@ def ensure_datetime(ts):
 
 def get_live_config(regime, direction):
     best = BEST_CONFIGS.get(regime, BEST_CONFIGS["flat"])
+
+    sl = float(best["sl_percent"])
+    tp = float(best["tp_percent"])
+    threshold = float(best["base_thr_sell"] if direction == -1 else best["thr_buy"])
+
+    if STRATEGY_MODE == "alpha":
+        sl *= 0.7
+        tp *= 0.65
+
     return {
-        "MASTER_CONVICTION_THRESHOLD": float(best["base_thr_sell"] if direction == -1 else best["thr_buy"]),
-        "SL_PERCENT": float(best["sl_percent"]),
-        "TP_PERCENT": float(best["tp_percent"])
+        "MASTER_CONVICTION_THRESHOLD": threshold,
+        "SL_PERCENT": sl,
+        "TP_PERCENT": tp,
     }
 
 def check_trade_closed(price, direction, sl_level, tp_level):
@@ -264,8 +275,10 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             confidence_entry=confidence,
             cointegration_entry=coint_score,
             entry_zscore=spread_zscore,
+            sl_pct=config["SL_PERCENT"],
+            tp_pct=config["TP_PERCENT"],
         )
-        manager = TradeManager(state, queue, timeout_seconds=600)
+        manager = TradeManager(state, queue, timeout_seconds=600, strategy_mode=STRATEGY_MODE)
         asyncio.get_running_loop().create_task(manager.start())
         queue.put_nowait((timestamp, entry_price, confidence, coint_score, spread_zscore, spread_slope))
         active_trades[pair] = manager

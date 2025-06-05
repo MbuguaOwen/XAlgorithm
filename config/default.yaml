@@ -12,6 +12,9 @@ backtest:
   seed: 42
   model_path: "ml_model/triangular_rf_model.json"
 
+# Switch between defensive and alpha trading styles
+strategy_mode: defensive
+
 
 model_paths:
   confidence_filter: ml_model/triangular_rf_model.json
