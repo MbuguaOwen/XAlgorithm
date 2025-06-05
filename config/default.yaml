@@ -13,7 +13,7 @@ backtest:
   model_path: "ml_model/triangular_rf_model.json"
 
 # Switch between defensive and alpha trading styles
-strategy_mode: defensive
+strategy_mode: alpha # Options: defensive, alpha
 
 
 model_paths:
