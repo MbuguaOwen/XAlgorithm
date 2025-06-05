@@ -30,6 +30,12 @@ MIN_Z_BUY = CONFIG.get("zscore_thresholds", {}).get("min_buy", 1.0)
 MIN_Z_SELL = CONFIG.get("zscore_thresholds", {}).get("min_sell", -1.0)
 MODEL_PATHS = CONFIG.get("model_paths", {})
 
+# === Entry Gate Thresholds ===
+ENTRY_CONFIDENCE_MIN = 0.75
+ENTRY_COINTEGRATION_MIN = 0.80
+ENTRY_ZSCORE_MIN = 2.5
+TRADE_LOCK_SECONDS = 30
+
 NAIROBI_TZ = pytz.timezone("Africa/Nairobi")
 reverse_pair_map = {0: "BTC", 1: "ETH"}
 regime_map = {0: "bull", 1: "bear", 2: "flat"}
@@ -63,8 +69,9 @@ def print_startup():
     print(f"   • Regime Classifier       → {os.path.basename(MODEL_PATHS.get('regime_classifier', 'regime_classifier.json'))}\n")
 
     print(color_text("⚙️  ENTRY FILTERS:", "yellow"))
-    print(f"   • MIN_Z_BUY  ≥ {MIN_Z_BUY}")
-    print(f"   • MIN_Z_SELL ≤ {MIN_Z_SELL}\n")
+    print(f"   • Confidence      ≥ {ENTRY_CONFIDENCE_MIN}")
+    print(f"   • Cointegration   ≥ {ENTRY_COINTEGRATION_MIN}")
+    print(f"   • Z-Score        ≥ {ENTRY_ZSCORE_MIN}\n")
 
 def print_shutdown():
     print(color_text("🛑 XAlgo [Signal Engine Stopped Gracefully]\n", "red"))
@@ -102,6 +109,16 @@ def compute_composite_exit_score(confidence, entry_conf, coint_score, spread_zsc
     z_reversal = 1 if (spread_zscore < -0.25) or (spread_zscore > 0.25) else 0
     return 0.4 * conf_decay + 0.3 * coint_decay + 0.3 * z_reversal
 
+def passes_entry_gates(confidence, coint_score, zscore):
+    """Return True if signal exceeds all entry gate thresholds."""
+    return (
+        confidence >= ENTRY_CONFIDENCE_MIN
+        and coint_score >= ENTRY_COINTEGRATION_MIN
+        and (
+            (zscore >= ENTRY_ZSCORE_MIN) or (zscore <= -ENTRY_ZSCORE_MIN)
+        )
+    )
+
 # === Main Tick Logic ===
 def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
     timestamp = ensure_datetime(timestamp)
@@ -129,11 +146,27 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
     pair = "ETHUSDT" if selected_leg == "ETH" else "BTCUSDT"
     live_price = entry_price
 
-    # === Apply Hybrid Z-Score Entry Filter ===
+    # === Primary Entry Gates ===
     spread_zscore = features.get("spread_zscore", 0.0)
-    if (direction == 1 and spread_zscore < MIN_Z_BUY) or (direction == -1 and spread_zscore > MIN_Z_SELL):
-        log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, "veto_zscore_weak",
-                         coint_score=coint_score, regime=regime)
+    if not passes_entry_gates(confidence, coint_score, spread_zscore):
+        reason = []
+        if confidence < ENTRY_CONFIDENCE_MIN:
+            reason.append("conf")
+        if coint_score < ENTRY_COINTEGRATION_MIN:
+            reason.append("coint")
+        if abs(spread_zscore) < ENTRY_ZSCORE_MIN:
+            reason.append("z")
+        log_signal_event(
+            timestamp,
+            spread,
+            confidence,
+            spread_zscore,
+            direction,
+            0,
+            "veto_" + "_".join(reason),
+            coint_score=coint_score,
+            regime=regime,
+        )
         return
 
     # === Cooldown Check ===
@@ -156,7 +189,12 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
     if cluster.maxlen != cluster_size:
         cluster_map[cluster_key] = deque(cluster, maxlen=cluster_size)
         cluster = cluster_map[cluster_key]
-    cluster.append({"direction": direction, "confidence": confidence, "coint": coint_score})
+    cluster.append({
+        "direction": direction,
+        "confidence": confidence,
+        "coint": coint_score,
+        "z": spread_zscore,
+    })
 
     # === Existing Trade Check ===
     if pair in active_trades:
@@ -186,7 +224,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             del active_trades[pair]
             cluster.clear()
             reverse_cluster.clear()
-            locked_until[pair] = timestamp + timedelta(seconds=15)
+            locked_until[pair] = timestamp + timedelta(seconds=TRADE_LOCK_SECONDS)
             return
 
         log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, "veto_trade_lock_active",
@@ -195,8 +233,12 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
 
     # === New Trade Entry ===
     if len(cluster) == cluster.maxlen and all(
-        s["direction"] == direction and s["confidence"] >= config["MASTER_CONVICTION_THRESHOLD"] and s["coint"] >= 0.8
-        for s in cluster):
+        s["direction"] == direction
+        and s["confidence"] >= ENTRY_CONFIDENCE_MIN
+        and s["coint"] >= ENTRY_COINTEGRATION_MIN
+        and (s["z"] >= ENTRY_ZSCORE_MIN or s["z"] <= -ENTRY_ZSCORE_MIN)
+        for s in cluster
+    ):
 
         sl = entry_price * (1 - config["SL_PERCENT"] / 100) if direction == 1 else entry_price * (1 + config["SL_PERCENT"] / 100)
         tp = entry_price * (1 + config["TP_PERCENT"] / 100) if direction == 1 else entry_price * (1 - config["TP_PERCENT"] / 100)
@@ -223,6 +265,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
                          "green" if direction == 1 else "red"))
         cluster.clear()
         reverse_cluster_map[pair].clear()
+        locked_until[pair] = timestamp + timedelta(seconds=TRADE_LOCK_SECONDS)
         return
 
     log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, "waiting_for_cluster",
