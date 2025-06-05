@@ -151,6 +151,16 @@ python retrain_all_models.py
 python label_all_targets.py
 ```
 
+### Parameter sweep backtest
+
+Use the provided `run_backtest.py` script to evaluate different confidence and
+SL/TP thresholds. Threshold ranges are loaded from `config/default.yaml` so runs
+are fully reproducible.
+
+```bash
+python run_backtest.py
+```
+
 ---
 
 ## 💡 Notes
