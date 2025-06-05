@@ -130,6 +130,8 @@ class TradeManager:
         pnl = ((self.state.exit_price - self.state.entry_price) / self.state.entry_price) * self.state.direction if self.state.exit_price is not None else 0.0
         self.state.exit_time = datetime.utcnow()
         duration = (self.state.exit_time - self.state.entry_time).total_seconds()
+        if duration < 0.01:
+            duration = 0.01
         log_trade_exit(
             timestamp=datetime.utcnow(),
             asset=self.state.asset,

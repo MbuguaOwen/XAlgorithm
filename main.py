@@ -44,9 +44,10 @@ MIN_Z_SELL = CONFIG.get("zscore_thresholds", {}).get("min_sell", -1.0)
 MODEL_PATHS = CONFIG.get("model_paths", {})
 
 # === Entry Gate Thresholds ===
-ENTRY_CONFIDENCE_MIN = 0.77
-ENTRY_COINTEGRATION_MIN = 0.85
-ENTRY_ZSCORE_MIN = 2.75
+ENTRY_CONFIDENCE_MIN = 0.65
+ENTRY_COINTEGRATION_MIN = 0.75
+ENTRY_ZSCORE_MIN = 2.0
+ENTRY_ZSCORE_FLAT = 1.8
 TRADE_LOCK_SECONDS = 180
 CLUSTER_SIZE = 9
 
@@ -85,7 +86,9 @@ def print_startup():
     print(color_text("⚙️  ENTRY FILTERS:", "yellow"))
     print(f"   • Confidence      ≥ {ENTRY_CONFIDENCE_MIN}")
     print(f"   • Cointegration   ≥ {ENTRY_COINTEGRATION_MIN}")
-    print(f"   • Z-Score        ≥ {ENTRY_ZSCORE_MIN}\n")
+    print(
+        f"   • Z-Score        ≥ {ENTRY_ZSCORE_MIN} (flat ≥ {ENTRY_ZSCORE_FLAT})\n"
+    )
 
 def print_shutdown():
     print(color_text("🛑 XAlgo [Signal Engine Stopped Gracefully]\n", "red"))
@@ -123,8 +126,9 @@ def compute_composite_exit_score(confidence, entry_conf, coint_score, spread_zsc
     z_reversal = 1 if (spread_zscore < -0.25) or (spread_zscore > 0.25) else 0
     return 0.4 * conf_decay + 0.3 * coint_decay + 0.3 * z_reversal
 
-def passes_entry_gates(confidence, coint_score, zscore, slope, direction):
+def passes_entry_gates(confidence, coint_score, zscore, slope, direction, regime):
     """Return True if signal exceeds all entry gate thresholds."""
+    z_min = ENTRY_ZSCORE_FLAT if regime == "flat" else ENTRY_ZSCORE_MIN
     if direction == 1:
         slope_ok = slope > 0
     elif direction == -1:
@@ -134,7 +138,7 @@ def passes_entry_gates(confidence, coint_score, zscore, slope, direction):
     return (
         confidence >= ENTRY_CONFIDENCE_MIN
         and coint_score >= ENTRY_COINTEGRATION_MIN
-        and abs(zscore) >= ENTRY_ZSCORE_MIN
+        and abs(zscore) >= z_min
         and slope_ok
     )
 
@@ -172,13 +176,14 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
     # === Primary Entry Gates ===
     spread_zscore = features.get("spread_zscore", 0.0)
     spread_slope = features.get("spread_slope", 0.0)
-    if not passes_entry_gates(confidence, coint_score, spread_zscore, spread_slope, direction):
+    if not passes_entry_gates(confidence, coint_score, spread_zscore, spread_slope, direction, regime):
         reason = []
         if confidence < ENTRY_CONFIDENCE_MIN:
             reason.append("conf")
         if coint_score < ENTRY_COINTEGRATION_MIN:
             reason.append("coint")
-        if abs(spread_zscore) < ENTRY_ZSCORE_MIN:
+        z_min = ENTRY_ZSCORE_FLAT if regime == "flat" else ENTRY_ZSCORE_MIN
+        if abs(spread_zscore) < z_min:
             reason.append("z")
         if not ((direction == 1 and spread_slope > 0) or (direction == -1 and spread_slope < 0)):
             reason.append("slope")
@@ -229,12 +234,16 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         return
 
     # === New Trade Entry ===
+    z_min = ENTRY_ZSCORE_FLAT if regime == "flat" else ENTRY_ZSCORE_MIN
     if len(cluster) == cluster.maxlen and all(
         s["direction"] == direction
         and s["confidence"] >= ENTRY_CONFIDENCE_MIN
         and s["coint"] >= ENTRY_COINTEGRATION_MIN
-        and abs(s["z"]) >= ENTRY_ZSCORE_MIN
-        and ((direction == 1 and s["slope"] > 0) or (direction == -1 and s["slope"] < 0))
+        and abs(s["z"]) >= z_min
+        and (
+            (direction == 1 and s["slope"] > 0)
+            or (direction == -1 and s["slope"] < 0)
+        )
         for s in cluster
     ):
 
