@@ -119,4 +119,12 @@ def generate_features_from_csvs(csv_paths):
     return pd.DataFrame(features)
 
 def generate_live_features(btc_price, eth_price, ethbtc_price, windows):
+    """Generate features from live prices using provided rolling windows."""
+    if isinstance(windows, deque):
+        windows = {
+            "spread": windows,
+            "btc": deque(maxlen=Z_SCORE_WINDOW),
+            "eth": deque(maxlen=Z_SCORE_WINDOW),
+            "ethbtc": deque(maxlen=Z_SCORE_WINDOW),
+        }
     return compute_triangle_features(btc_price, eth_price, ethbtc_price, windows)
