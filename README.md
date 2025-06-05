@@ -112,6 +112,7 @@ python retrain_all_models.py
 * Columns:
 
   * `timestamp, spread, confidence, zscore, direction, action, reason, profit, sl, tp, slope, regime`
+* Set environment variable `DISPLAY_HOLD=false` to suppress HOLD log lines.
 
 ---
 
