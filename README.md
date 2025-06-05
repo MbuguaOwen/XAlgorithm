@@ -112,6 +112,7 @@ python retrain_all_models.py
 * Columns:
 
   * `timestamp, spread, confidence, zscore, direction, action, reason, profit, sl, tp, slope, regime`
+* Set environment variable `DISPLAY_HOLD=false` to suppress HOLD log lines.
 
 ---
 
@@ -138,6 +139,13 @@ python retrain_all_models.py
 ```bash
 python main.py
 ```
+Example output:
+
+```text
+✅ TRADE SIGNAL: BUY BTC/USDT @ 27180.25 | SL: 0.21% | TP: 0.55% | Confidence: 0.93
+```
+
+Set environment variable `DISPLAY_HOLD=false` to hide HOLD lines.
 
 ### Run full model training:
 
@@ -149,6 +157,16 @@ python retrain_all_models.py
 
 ```bash
 python label_all_targets.py
+```
+
+### Parameter sweep backtest
+
+Use the provided `run_backtest.py` script to evaluate different confidence and
+SL/TP thresholds. Threshold ranges are loaded from `config/default.yaml` so runs
+are fully reproducible.
+
+```bash
+python run_backtest.py
 ```
 
 ---

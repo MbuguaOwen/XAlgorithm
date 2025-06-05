@@ -1,1 +1,61 @@
-# Model path, thresholds, exchange settings
+# Default configuration for backtest sweeps
+backtest:
+  sell_thresholds: [0.80, 0.83, 0.86, 0.89, 0.92, 0.95, 0.98]
+  buy_thresholds: [0.70, 0.73, 0.76, 0.79, 0.82, 0.85]
+  sl_percents: [0.15, 0.17, 0.19]
+  tp_percents: [0.54, 0.61, 0.68, 0.75]
+  # Newly tuned threshold ranges used for comparison backtests
+  sell_thresholds_new: [0.85, 0.88, 0.91, 0.94]
+  buy_thresholds_new: [0.72, 0.75, 0.78, 0.81]
+  sl_percents_new: [0.12, 0.14, 0.16]
+  tp_percents_new: [0.65, 0.72, 0.79]
+  seed: 42
+  model_path: "ml_model/triangular_rf_model.json"
+
+# Switch between defensive and alpha trading styles
+strategy_mode: alpha # Options: defensive, alpha
+
+
+model_paths:
+  confidence_filter: ml_model/triangular_rf_model.json
+  pair_selector: ml_model/pair_selector_model.json
+  cointegration_model: ml_model/cointegration_score_model.json
+  regime_classifier: ml_model/regime_classifier.json
+
+zscore_thresholds:
+  min_buy: 1.0
+  min_sell: -1.0
+
+entry_thresholds:
+  confidence_min: 0.65
+  cointegration_min: 0.75
+  zscore_min: 2.0
+  zscore_min_flat: 1.8
+  min_volatility: 0.02
+  entry_slope_min: 0.01
+
+# Profit-oriented thresholds with R:R tuning for Phase IV+
+regime_defaults:
+  bull:
+    base_thr_sell: 0.98
+    thr_buy: 0.77
+    sl_percent: 0.30
+    tp_percent: 0.85
+  bear:
+    base_thr_sell: 0.98
+    thr_buy: 0.77
+    sl_percent: 0.30
+    tp_percent: 0.85
+  flat:
+    base_thr_sell: 0.90
+    thr_buy: 0.70
+    sl_percent: 0.30
+    tp_percent: 0.85
+  neutral:
+    base_thr_sell: 0.90
+    thr_buy: 0.70
+    sl_percent: 0.30
+    tp_percent: 0.85
+
+websocket:
+  binance_url: "wss://stream.binance.com:9443/stream?streams=btcusdt@ticker/ethusdt@ticker/ethbtc@ticker"

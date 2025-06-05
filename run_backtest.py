@@ -3,6 +3,19 @@ import numpy as np
 import itertools
 import matplotlib.pyplot as plt
 import seaborn as sns
+import yaml
+from collections import deque
+import csv
+
+from utils.filters import MLFilter
+from core.feature_pipeline import compute_triangle_features, Z_SCORE_WINDOW
+from core.execution_engine import calculate_dynamic_sl_tp
+
+CONFIG_PATH = "config/default.yaml"
+with open(CONFIG_PATH, "r") as f:
+    cfg = yaml.safe_load(f)
+
+np.random.seed(cfg.get("backtest", {}).get("seed", 42))
 
 TICK_CSV = "data/triangular_ticks.csv"
 df = pd.read_csv(TICK_CSV)
@@ -17,75 +30,180 @@ N_TUNE_ROWS = None   # Set None for all data, or pick a number for speed
 if N_TUNE_ROWS:
     df = df.iloc[:N_TUNE_ROWS].copy()
 
+model = MLFilter(cfg["backtest"].get("model_path", "ml_model/triangular_rf_model.json"))
+
+# rolling windows for feature generation
+windows_template = {
+    "spread": deque(maxlen=Z_SCORE_WINDOW),
+    "btc": deque(maxlen=Z_SCORE_WINDOW),
+    "eth": deque(maxlen=Z_SCORE_WINDOW),
+    "ethbtc": deque(maxlen=Z_SCORE_WINDOW),
+}
+
 def run_backtest(
     df,
     base_thr_sell,
     thr_buy,
     sl_percent,
     tp_percent,
+    version="old",
+    writer=None,
 ):
     trades = []
-    for idx, row in df.iterrows():
-        # Example placeholder logic (replace with real model logic if available)
-        model_confidence_sell = row.get('conf_sell', np.random.uniform(0.6, 1.0))
-        model_confidence_buy  = row.get('conf_buy', np.random.uniform(0.6, 1.0))
+    windows = {k: deque(maxlen=Z_SCORE_WINDOW) for k in windows_template}
+    for idx in range(len(df) - 1):
+        row = df.iloc[idx]
+
+        features = compute_triangle_features(
+            row["btc_price"], row["eth_price"], row["ethbtc_price"], windows
+        )
+        confidence, signal = model.predict_with_confidence(pd.DataFrame([features]))
+
         direction = 0
-        if model_confidence_sell > base_thr_sell:
-            direction = -1  # SELL
-        elif model_confidence_buy > thr_buy:
-            direction = 1   # BUY
+        if signal == -1 and confidence > base_thr_sell:
+            direction = -1
+        elif signal == 1 and confidence > thr_buy:
+            direction = 1
+
         if direction != 0:
-            pnl = np.random.normal(loc=0.10*direction, scale=0.05)
-            rr = np.abs(pnl) / (sl_percent/100)
-            trades.append((pnl, rr, direction))
+            next_row = df.iloc[idx + 1]
+            next_features = compute_triangle_features(
+                next_row["btc_price"], next_row["eth_price"], next_row["ethbtc_price"], windows
+            )
+
+            dyn_sl, dyn_tp = calculate_dynamic_sl_tp(
+                spread_zscore=features["spread_zscore"],
+                vol_spread=features["vol_spread"],
+                confidence=confidence,
+            )
+            stop_loss_pct = sl_percent * (dyn_sl / 0.3)
+            take_profit_pct = tp_percent * (dyn_tp / 0.5)
+
+            price_change_pct = (
+                (next_row["eth_price"] - row["eth_price"]) / row["eth_price"] * 100
+            )
+            pnl = price_change_pct * direction
+            rr = np.abs(pnl) / stop_loss_pct if stop_loss_pct else 0.0
+            if pnl >= take_profit_pct:
+                exit_reason = "TP"
+            elif pnl <= -stop_loss_pct:
+                exit_reason = "SL"
+            else:
+                exit_reason = "HOLD"
+            trades.append((pnl, rr, direction, exit_reason))
+            if writer:
+                writer.writerow({
+                    "version": version,
+                    "base_thr_sell": base_thr_sell,
+                    "thr_buy": thr_buy,
+                    "sl_percent": sl_percent,
+                    "tp_percent": tp_percent,
+                    "pnl": pnl,
+                    "exit_reason": exit_reason,
+                })
     if not trades:
-        return 0, 0, 0, 0, 0, 0
-    pnls, rrs, directions = zip(*trades)
+        return {
+            "rr_realized": 0,
+            "sharpe": 0,
+            "win_rate": 0,
+            "avg_pnl": 0,
+            "max_drawdown": 0,
+            "n_trades": 0,
+            "n_buys": 0,
+            "n_sells": 0,
+            "tp_count": 0,
+            "sl_count": 0,
+            "version": version,
+            "base_thr_sell": base_thr_sell,
+            "thr_buy": thr_buy,
+            "sl_percent": sl_percent,
+            "tp_percent": tp_percent,
+        }
+    pnls, rrs, directions, reasons = zip(*trades)
     rr_realized = np.mean(rrs)
     sharpe = np.mean(pnls) / (np.std(pnls) + 1e-9)
     win_rate = np.mean([p > 0 for p in pnls])
+    avg_pnl = np.mean(pnls)
+    equity = np.cumsum(pnls)
+    drawdown = np.minimum.accumulate(equity) - equity
+    max_drawdown = drawdown.min() if len(drawdown) else 0
     n_trades = len(trades)
     n_buys = np.sum([d == 1 for d in directions])
     n_sells = np.sum([d == -1 for d in directions])
-    return rr_realized, sharpe, win_rate, n_trades, n_buys, n_sells
-
-# Define sweep ranges for all 4 thresholds (match your Optuna or gridsearch ranges)
-sell_thresholds = np.arange(0.80, 0.99, 0.03)     # 0.80, 0.83, ..., 0.98
-buy_thresholds  = np.arange(0.70, 0.88, 0.03)      # 0.70, 0.73, ..., 0.85
-sl_percents     = np.arange(0.15, 0.21, 0.02)      # 0.15, 0.17, 0.19
-tp_percents     = np.arange(0.54, 0.76, 0.07)      # 0.54, 0.61, ..., 0.75
-
-# Cartesian product of all threshold combos
-threshold_combos = list(itertools.product(sell_thresholds, buy_thresholds, sl_percents, tp_percents))
-
-results = []
-print("\n==== Threshold Performance Summary ====")
-print("SELL_THR  BUY_THR   SL%   TP%   R:R     Sharpe   WinRate  Trades  Buys  Sells")
-print("-"*80)
-for thr_sell, thr_buy, sl, tp in threshold_combos:
-    rr, sharpe, win_rate, n_trades, n_buys, n_sells = run_backtest(
-        df,
-        base_thr_sell=thr_sell,
-        thr_buy=thr_buy,
-        sl_percent=sl,
-        tp_percent=tp,
-    )
-    print(f"{thr_sell:7.2f}  {thr_buy:7.2f}  {sl:4.2f}  {tp:4.2f}   {rr:6.2f}   {sharpe:7.2f}   {win_rate:7.2f}  {n_trades:6d}  {n_buys:5d}  {n_sells:5d}")
-    results.append({
-        "base_thr_sell": thr_sell,
-        "thr_buy": thr_buy,
-        "sl_percent": sl,
-        "tp_percent": tp,
-        "rr_realized": rr,
+    tp_count = reasons.count("TP")
+    sl_count = reasons.count("SL")
+    return {
+        "rr_realized": rr_realized,
         "sharpe": sharpe,
         "win_rate": win_rate,
+        "avg_pnl": avg_pnl,
+        "max_drawdown": max_drawdown,
         "n_trades": n_trades,
         "n_buys": n_buys,
         "n_sells": n_sells,
-    })
+        "tp_count": tp_count,
+        "sl_count": sl_count,
+        "version": version,
+        "base_thr_sell": base_thr_sell,
+        "thr_buy": thr_buy,
+        "sl_percent": sl_percent,
+        "tp_percent": tp_percent,
+    }
+
+# Define sweep ranges from config to ensure reproducibility
+back_cfg = cfg.get("backtest", {})
+sell_thresholds = back_cfg.get("sell_thresholds", [0.80, 0.83, 0.86])
+buy_thresholds = back_cfg.get("buy_thresholds", [0.70, 0.73, 0.76])
+sl_percents = back_cfg.get("sl_percents", [0.15, 0.17])
+tp_percents = back_cfg.get("tp_percents", [0.54, 0.61])
+
+sell_thresholds_new = back_cfg.get("sell_thresholds_new", sell_thresholds)
+buy_thresholds_new = back_cfg.get("buy_thresholds_new", buy_thresholds)
+sl_percents_new = back_cfg.get("sl_percents_new", sl_percents)
+tp_percents_new = back_cfg.get("tp_percents_new", tp_percents)
+
+combos_old = list(itertools.product(sell_thresholds, buy_thresholds, sl_percents, tp_percents))
+combos_new = list(itertools.product(sell_thresholds_new, buy_thresholds_new, sl_percents_new, tp_percents_new))
+
+results = []
+log_path = "logs/backtest_trades.csv"
+with open(log_path, "w", newline="") as f:
+    fieldnames = ["version", "base_thr_sell", "thr_buy", "sl_percent", "tp_percent", "pnl", "exit_reason"]
+    writer = csv.DictWriter(f, fieldnames=fieldnames)
+    writer.writeheader()
+
+    print("\n==== Threshold Performance Summary (OLD) ====")
+    print("SELL_THR  BUY_THR   SL%   TP%   WinRate  AvgPnL  MaxDD  Trades")
+    print("-" * 80)
+    for thr_sell, thr_buy, sl, tp in combos_old:
+        res = run_backtest(df, thr_sell, thr_buy, sl, tp, version="old", writer=writer)
+        print(f"{thr_sell:7.2f}  {thr_buy:7.2f}  {sl:4.2f}  {tp:4.2f}   {res['win_rate']:7.2f}  {res['avg_pnl']:7.2f}  {res['max_drawdown']:7.2f}  {res['n_trades']:6d}")
+        results.append(res)
+
+    print("\n==== Threshold Performance Summary (NEW) ====")
+    print("SELL_THR  BUY_THR   SL%   TP%   WinRate  AvgPnL  MaxDD  Trades")
+    print("-" * 80)
+    for thr_sell, thr_buy, sl, tp in combos_new:
+        res = run_backtest(df, thr_sell, thr_buy, sl, tp, version="new", writer=writer)
+        print(f"{thr_sell:7.2f}  {thr_buy:7.2f}  {sl:4.2f}  {tp:4.2f}   {res['win_rate']:7.2f}  {res['avg_pnl']:7.2f}  {res['max_drawdown']:7.2f}  {res['n_trades']:6d}")
+        results.append(res)
 
 df_results = pd.DataFrame(results)
 df_results.to_csv("quant_sweep_summary_full.csv", index=False)
+
+summary = df_results.groupby("version")[["win_rate", "avg_pnl", "max_drawdown"]].mean()
+print("\n==== Summary by Version ====")
+print(summary)
+
+tp_sl = df_results.groupby("version")[["tp_count", "sl_count"]].sum()
+tp_sl.plot(kind="bar")
+plt.title("TP vs SL Counts")
+plt.ylabel("Count")
+plt.savefig("tp_sl_counts.png")
+
+if set(summary.index) >= {"old", "new"}:
+    edge_improved = summary.loc["new", "avg_pnl"] > summary.loc["old", "avg_pnl"]
+    print("\nEdge Improved:" , edge_improved)
 
 # --- Print best by Sharpe and R:R ---
 best_sharpe = df_results.loc[df_results.sharpe.idxmax()]
