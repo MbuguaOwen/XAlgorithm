@@ -79,7 +79,7 @@ def color_text(text, color):
     return f"{colors.get(color,'')}{text}{colors['reset']}"
 
 def print_startup():
-    print(color_text("✅ XAlgo [Signal Engine Started]\n", "green"))
+    print(color_text("✅ XAlgo Signal Engine Ready – Awaiting High-Confidence Trades...\n", "green"))
     print(color_text("📊 ACTIVE MODELS:", "yellow"))
     print(f"   • Confidence Filter       → {os.path.basename(MODEL_PATHS.get('confidence_filter', 'triangular_rf_model.json'))}")
     print(f"   • Pair Selector           → {os.path.basename(MODEL_PATHS.get('pair_selector', 'pair_selector_model.json'))}")
@@ -302,7 +302,14 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             take_profit=tp,
         )
 
-        display_signal_info(direction, config["SL_PERCENT"], config["TP_PERCENT"], confidence)
+        display_signal_info(
+            direction,
+            config["SL_PERCENT"],
+            config["TP_PERCENT"],
+            confidence,
+            pair=pair,
+            entry_price=entry_price,
+        )
         cluster.clear()
         reverse_cluster_map[pair].clear()
         locked_until[pair] = timestamp + timedelta(seconds=TRADE_LOCK_SECONDS)
