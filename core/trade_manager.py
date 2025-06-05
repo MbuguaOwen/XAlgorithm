@@ -23,6 +23,7 @@ class TradeState:
     exit_price: Optional[float] = None
     confidence_exit: Optional[float] = None
     cointegration_exit: Optional[float] = None
+    exit_time: Optional[datetime] = None
 
     def __post_init__(self):
         self.best_price = self.entry_price
@@ -74,6 +75,7 @@ class TradeManager:
             if coint is not None:
                 self.state.cointegration_exit = coint
 
+            # Track best favorable price
             if self.state.direction == 1:
                 if price > self.state.best_price:
                     self.state.best_price = price
@@ -81,36 +83,42 @@ class TradeManager:
                 if price < self.state.best_price:
                     self.state.best_price = price
 
-            if conf is not None and conf < 0.55:
-                self.state.exit_reason = "CONFIDENCE_EXIT"
+            # --- Emergency exits ---
+            if conf is not None and conf < 0.50:
+                self.state.exit_reason = "EMERGENCY_CONFIDENCE"
                 self.state.exit_price = price
-            elif coint is not None and coint < 0.75:
-                self.state.exit_reason = "COINTEGRATION_EXIT"
+            elif coint is not None and coint < 0.70:
+                self.state.exit_reason = "EMERGENCY_COINTEGRATION"
                 self.state.exit_price = price
-
-            if self.state.exit_reason is None:
-                if self.state.direction == 1 and slope < 0 and price < self.state.entry_price * 0.995:
-                    self.state.exit_reason = "TREND_COLLAPSE"
-                    self.state.exit_price = price
-                elif self.state.direction == -1 and slope > 0 and price > self.state.entry_price * 1.005:
-                    self.state.exit_reason = "TREND_COLLAPSE"
-                    self.state.exit_price = price
-
-            if self.state.exit_reason is None:
-                if self.state.direction == 1 and zscore <= 0 and price > self.state.entry_price:
-                    self.state.exit_reason = "TP_REVERSION"
-                    self.state.exit_price = price
-                elif self.state.direction == -1 and zscore >= 0 and price < self.state.entry_price:
-                    self.state.exit_reason = "TP_REVERSION"
-                    self.state.exit_price = price
-
-            if self.state.exit_reason is None:
+            else:
                 peak = self.state.best_price
-                if self.state.direction == 1 and price <= peak * 0.6:
-                    self.state.exit_reason = "PRICE_REVERSAL"
+                if self.state.direction == 1 and peak > self.state.entry_price:
+                    threshold = peak - 0.4 * (peak - self.state.entry_price)
+                    if price <= threshold:
+                        self.state.exit_reason = "EMERGENCY_REVERSAL"
+                        self.state.exit_price = price
+                elif self.state.direction == -1 and peak < self.state.entry_price:
+                    threshold = peak + 0.4 * (self.state.entry_price - peak)
+                    if price >= threshold:
+                        self.state.exit_reason = "EMERGENCY_REVERSAL"
+                        self.state.exit_price = price
+
+            # --- Dynamic Take Profit ---
+            if self.state.exit_reason is None:
+                if self.state.direction == 1 and zscore <= 0 and conf is not None and conf >= self.state.confidence_entry * 0.95:
+                    self.state.exit_reason = "TP_REVERSION"
                     self.state.exit_price = price
-                elif self.state.direction == -1 and price >= peak * 1.4:
-                    self.state.exit_reason = "PRICE_REVERSAL"
+                elif self.state.direction == -1 and zscore >= 0 and conf is not None and conf >= self.state.confidence_entry * 0.95:
+                    self.state.exit_reason = "TP_REVERSION"
+                    self.state.exit_price = price
+
+            # --- Adaptive Stop Loss ---
+            if self.state.exit_reason is None:
+                if conf is not None and conf < self.state.confidence_entry * 0.8:
+                    self.state.exit_reason = "ADAPTIVE_SL_CONF"
+                    self.state.exit_price = price
+                elif (self.state.direction == 1 and slope < 0) or (self.state.direction == -1 and slope > 0):
+                    self.state.exit_reason = "ADAPTIVE_SL_TREND"
                     self.state.exit_price = price
 
             if self.state.exit_reason:
@@ -120,6 +128,8 @@ class TradeManager:
     async def _log_and_stop(self):
         self._active = False
         pnl = ((self.state.exit_price - self.state.entry_price) / self.state.entry_price) * self.state.direction if self.state.exit_price is not None else 0.0
+        self.state.exit_time = datetime.utcnow()
+        duration = (self.state.exit_time - self.state.entry_time).total_seconds()
         log_trade_exit(
             timestamp=datetime.utcnow(),
             asset=self.state.asset,
@@ -132,6 +142,7 @@ class TradeManager:
             cointegration_entry=self.state.cointegration_entry,
             cointegration_exit=self.state.cointegration_exit if self.state.cointegration_exit is not None else 0.0,
             exit_reason=self.state.exit_reason or "UNKNOWN",
+            duration=duration,
         )
 
         EXIT_REASON_COUNTS.labels(self.state.exit_reason or "UNKNOWN").inc()
