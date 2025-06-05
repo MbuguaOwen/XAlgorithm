@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 import pytz
 import sys
 import os
+import signal
+import atexit
 
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
@@ -38,6 +40,24 @@ pair_selector       = MLFilter("ml_model/pair_selector_model.json")
 cointegration_model = MLFilter("ml_model/cointegration_score_model.json")
 regime_classifier   = MLFilter("ml_model/regime_classifier.json")
 
+def color_text(text, color):
+    colors = {"green": "\033[92m", "red": "\033[91m", "yellow": "\033[93m", "reset": "\033[0m"}
+    return f"{colors.get(color,'')}{text}{colors['reset']}"
+
+def print_startup():
+    print(color_text("✅ XAlgo Signal Engine Started\n", "green"))
+
+def print_shutdown():
+    print(color_text("🛑 XAlgo Signal Engine Stopped Gracefully\n", "red"))
+
+def graceful_exit(*args):
+    print_shutdown()
+    sys.exit(0)
+
+atexit.register(print_shutdown)
+signal.signal(signal.SIGINT, graceful_exit)
+signal.signal(signal.SIGTERM, graceful_exit)
+
 def ensure_datetime(ts):
     if isinstance(ts, datetime):
         return ts.astimezone(NAIROBI_TZ) if ts.tzinfo else pytz.utc.localize(ts).astimezone(NAIROBI_TZ)
@@ -52,10 +72,6 @@ def get_live_config(regime, direction):
         "SL_PERCENT": float(best["sl_percent"]),
         "TP_PERCENT": float(best["tp_percent"])
     }
-
-def color_text(text, color):
-    colors = {"green": "\033[92m", "red": "\033[91m", "yellow": "\033[93m", "reset": "\033[0m"}
-    return f"{colors[color]}{text}{colors['reset']}"
 
 def check_trade_closed(price, direction, sl_level, tp_level):
     return (price >= tp_level or price <= sl_level) if direction == 1 else (price <= tp_level or price >= sl_level)
@@ -124,7 +140,6 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         peak_price = max(trade["max_price"], live_price) if direction == 1 else min(trade["min_price"], live_price)
         trade["max_price"] = peak_price if direction == 1 else trade["max_price"]
         trade["min_price"] = peak_price if direction == -1 else trade["min_price"]
-        retrace = abs((live_price - peak_price) / peak_price)
 
         entry_conf = trade.get("entry_confidence", confidence)
         entry_z = trade.get("entry_z", spread_zscore)
@@ -193,7 +208,8 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
 
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    logging.info("\ud83d\ude80 XAlgo: Smart Conviction Engine Starting...")
+    print_startup()
+    logging.info("Engine initialized. Awaiting ticks...")
     ingestor = BinanceIngestor()
     await ingestor.stream(process_tick)
 
