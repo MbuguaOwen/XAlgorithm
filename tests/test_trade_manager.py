@@ -24,6 +24,7 @@ async def test_tp_hit(tmp_path, monkeypatch):
     with open(log_path) as f:
         rows = list(csv.DictReader(f))
     assert rows[0]["exit_reason"] == "TP_REVERSION"
+    assert float(rows[0]["duration"]) > 0
 
 @pytest.mark.asyncio
 async def test_sl_hit(tmp_path, monkeypatch):
@@ -38,7 +39,7 @@ async def test_sl_hit(tmp_path, monkeypatch):
     q.put_nowait((datetime.utcnow(), 99.0, 0.8, 0.9, 3.0, -0.2))
     await asyncio.sleep(0.2)
     task.cancel()
-    assert state.exit_reason == "TREND_COLLAPSE"
+    assert state.exit_reason == "ADAPTIVE_SL_TREND"
 
 @pytest.mark.asyncio
 async def test_confidence_drop(tmp_path, monkeypatch):
@@ -53,7 +54,7 @@ async def test_confidence_drop(tmp_path, monkeypatch):
     q.put_nowait((datetime.utcnow(), 100.0, 0.4, 0.9, 3.0, 0.1))
     await asyncio.sleep(0.2)
     task.cancel()
-    assert state.exit_reason == "CONFIDENCE_EXIT"
+    assert state.exit_reason == "EMERGENCY_CONFIDENCE"
 
 @pytest.mark.asyncio
 async def test_cointegration_fail(tmp_path, monkeypatch):
@@ -68,7 +69,7 @@ async def test_cointegration_fail(tmp_path, monkeypatch):
     q.put_nowait((datetime.utcnow(), 100.0, 0.8, 0.6, 3.0, 0.1))
     await asyncio.sleep(0.2)
     task.cancel()
-    assert state.exit_reason == "COINTEGRATION_EXIT"
+    assert state.exit_reason == "EMERGENCY_COINTEGRATION"
 
 @pytest.mark.asyncio
 async def test_timeout_exit(tmp_path, monkeypatch):

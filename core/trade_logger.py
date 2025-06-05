@@ -117,6 +117,7 @@ def log_trade_exit(
     cointegration_entry,
     cointegration_exit,
     exit_reason,
+    duration,
 ):
     """Log trade exit information to execution_log.csv"""
     try:
@@ -135,6 +136,7 @@ def log_trade_exit(
             "cointegration_entry": round(float(cointegration_entry), 4),
             "cointegration_exit": round(float(cointegration_exit), 4),
             "exit_reason": exit_reason,
+            "duration": round(float(duration), 2),
         }
 
         file_exists = os.path.isfile(EXECUTION_LOG_FILE)
