@@ -139,6 +139,13 @@ python retrain_all_models.py
 ```bash
 python main.py
 ```
+Example output:
+
+```text
+✅ TRADE SIGNAL: BUY BTC/USDT @ 27180.25 | SL: 0.21% | TP: 0.55% | Confidence: 0.93
+```
+
+Set environment variable `DISPLAY_HOLD=false` to hide HOLD lines.
 
 ### Run full model training:
 

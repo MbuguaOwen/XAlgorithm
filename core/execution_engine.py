@@ -43,23 +43,34 @@ def calculate_dynamic_sl_tp(spread_zscore, vol_spread, confidence, regime=None):
 # ────────────────────────────────────────────────────────────────────────
 # 📢 Signal Display Helper
 # ────────────────────────────────────────────────────────────────────────
-def display_signal_info(signal: int, sl_pct: float, tp_pct: float, confidence: float):
-    """Print trade direction with risk parameters, avoiding HOLD spam."""
+def display_signal_info(
+    signal: int,
+    sl_pct: float,
+    tp_pct: float,
+    confidence: float,
+    pair: str | None = None,
+    entry_price: float | None = None,
+):
+    """Print concise BUY/SELL messages and optionally SHOW holds."""
     global _LAST_SIGNAL_STATE
 
-    direction_map = {1: "🟢 BUY", -1: "🔴 SELL", 0: "⚪ HOLD"}
+    direction_map = {1: "BUY", -1: "SELL", 0: "HOLD"}
 
     # Handle HOLD filtering
     if signal == 0:
-        if DISPLAY_HOLD and _LAST_SIGNAL_STATE in (1, -1):
-            msg = f"{direction_map[0]} | SL={sl_pct:.2f}% | TP={tp_pct:.2f}% | Conf={confidence:.2f}"
-            print(msg)
+        if DISPLAY_HOLD and signal != _LAST_SIGNAL_STATE:
+            print("⚪ HOLD")
         _LAST_SIGNAL_STATE = 0
         return
 
     # BUY or SELL
     if signal != _LAST_SIGNAL_STATE:
-        msg = f"{direction_map.get(signal, '⚪ HOLD')} | SL={sl_pct:.2f}% | TP={tp_pct:.2f}% | Conf={confidence:.2f}"
+        pair_fmt = pair.replace("USDT", "/USDT") if pair else ""
+        price_fmt = f" @ {entry_price:.2f}" if entry_price is not None else ""
+        msg = (
+            f"✅ TRADE SIGNAL: {direction_map.get(signal)} {pair_fmt}{price_fmt} "
+            f"| SL: {sl_pct:.2f}% | TP: {tp_pct:.2f}% | Confidence: {confidence:.2f}"
+        )
         print(msg)
     _LAST_SIGNAL_STATE = signal
     # Print paper, don't burn it. No guessing. Enter only when the edge is sharp. Otherwise, hold the trigger.
