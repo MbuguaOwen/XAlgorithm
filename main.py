@@ -20,6 +20,7 @@ from utils.filters import MLFilter
 from core.feature_pipeline import generate_live_features
 from core.trade_logger import log_signal_event, log_execution_event
 from core.trade_manager import TradeManager, TradeState
+from core.execution_engine import display_signal_info
 from data.binance_ingestor import BinanceIngestor
 from core.prom_metrics import (
     CONFIDENCE_SCORE,
@@ -163,6 +164,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
     if direction == 0:
         log_signal_event(timestamp, spread, confidence, features.get("spread_zscore", 0), 0, 0, "veto_no_trade")
         MISSED_OPPORTUNITIES.inc()
+        display_signal_info(0, 0.0, 0.0, confidence)
         return
 
     coint_score, _ = cointegration_model.predict_with_confidence(pd.DataFrame([features]).reindex(columns=cointegration_model.model.feature_names_in_))
@@ -199,6 +201,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             regime=regime,
         )
         MISSED_OPPORTUNITIES.inc()
+        display_signal_info(0, 0.0, 0.0, confidence)
         return
 
     # === Cooldown Check ===
@@ -206,6 +209,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, "veto_cooldown_active",
                          coint_score=coint_score, regime=regime)
         MISSED_OPPORTUNITIES.inc()
+        display_signal_info(0, 0.0, 0.0, confidence)
         return
 
     config = get_live_config(regime, direction)
@@ -231,6 +235,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, "veto_trade_lock_active",
                          coint_score=coint_score, regime=regime)
         MISSED_OPPORTUNITIES.inc()
+        display_signal_info(0, 0.0, 0.0, confidence)
         return
 
     # === New Trade Entry ===
@@ -284,12 +289,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             take_profit=tp,
         )
 
-        print(
-            color_text(
-                f"\n{['SELL','HOLD','BUY'][direction]} SIGNAL [{pair}] | Entry={entry_price:.2f} SL={sl:.2f} TP={tp:.2f} | Regime={regime} @ {timestamp.strftime('%H:%M:%S')}\n",
-                "green" if direction == 1 else "red",
-            )
-        )
+        display_signal_info(direction, config["SL_PERCENT"], config["TP_PERCENT"], confidence)
         cluster.clear()
         reverse_cluster_map[pair].clear()
         locked_until[pair] = timestamp + timedelta(seconds=TRADE_LOCK_SECONDS)
