@@ -84,3 +84,44 @@ async def test_timeout_exit(tmp_path, monkeypatch):
     await asyncio.sleep(1.2)
     task.cancel()
     assert state.exit_reason == "TIMEOUT"
+
+
+@pytest.mark.asyncio
+async def test_trailing_tp_exit(tmp_path, monkeypatch):
+    log_path = tmp_path / "exec.csv"
+    monkeypatch.setattr(trade_logger, "EXECUTION_LOG_FILE", str(log_path))
+
+    q = asyncio.Queue()
+    state = TradeState(
+        "BTCUSDT", 1, 100.0, datetime.utcnow(), 0.8, 0.9, 3.0, tp_pct=2.0
+    )
+    manager = TradeManager(state, q, timeout_seconds=5)
+    task = asyncio.create_task(manager.start())
+    q.put_nowait((datetime.utcnow(), 100.0, 0.8, 0.9, 3.0, 0.1))
+    q.put_nowait((datetime.utcnow(), 101.0, 0.8, 0.9, 3.0, 0.1))
+    q.put_nowait((datetime.utcnow(), 102.0, 0.8, 0.9, 3.0, 0.1))
+    q.put_nowait((datetime.utcnow(), 100.9, 0.8, 0.9, 3.0, 0.1))
+    await asyncio.sleep(0.2)
+    task.cancel()
+    assert state.exit_reason == "TRAILING_TP"
+
+
+@pytest.mark.asyncio
+async def test_sl_ratchet_exit(tmp_path, monkeypatch):
+    log_path = tmp_path / "exec.csv"
+    monkeypatch.setattr(trade_logger, "EXECUTION_LOG_FILE", str(log_path))
+
+    q = asyncio.Queue()
+    state = TradeState(
+        "BTCUSDT", 1, 100.0, datetime.utcnow(), 0.8, 0.9, 3.0, tp_pct=2.0
+    )
+    manager = TradeManager(state, q, timeout_seconds=5)
+    task = asyncio.create_task(manager.start())
+    q.put_nowait((datetime.utcnow(), 100.0, 0.8, 0.9, 3.0, 0.1))
+    q.put_nowait((datetime.utcnow(), 101.0, 0.8, 0.9, 3.0, 0.1))
+    q.put_nowait((datetime.utcnow(), 101.5, 0.8, 0.9, 3.0, 0.1))
+    q.put_nowait((datetime.utcnow(), 100.04, 0.8, 0.9, 3.0, 0.1))
+    await asyncio.sleep(0.2)
+    task.cancel()
+    assert state.exit_reason == "SL_RATCHETED_EXIT"
+
