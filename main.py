@@ -33,7 +33,12 @@ MODEL_PATHS = CONFIG.get("model_paths", {})
 NAIROBI_TZ = pytz.timezone("Africa/Nairobi")
 reverse_pair_map = {0: "BTC", 1: "ETH"}
 regime_map = {0: "bull", 1: "bear", 2: "flat"}
-WINDOW = deque(maxlen=200)
+WINDOWS = {
+    "spread": deque(maxlen=200),
+    "btc": deque(maxlen=200),
+    "eth": deque(maxlen=200),
+    "ethbtc": deque(maxlen=200),
+}
 cluster_map = defaultdict(lambda: deque(maxlen=5))
 active_trades = {}
 locked_until = {}
@@ -102,7 +107,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
     timestamp = ensure_datetime(timestamp)
     implied_ethbtc = eth_price / btc_price
     spread = implied_ethbtc - ethbtc_price
-    features = generate_live_features(btc_price, eth_price, ethbtc_price, WINDOW)
+    features = generate_live_features(btc_price, eth_price, ethbtc_price, WINDOWS)
     if not features:
         log_signal_event(timestamp, spread, 0.0, 0.0, None, 0, "veto_feature_fail")
         return
