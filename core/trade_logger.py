@@ -103,3 +103,46 @@ def log_execution_event(
 
     except Exception as e:
         logging.error(f"❌ Failed to log execution: {e}")
+
+
+def log_trade_exit(
+    timestamp,
+    asset,
+    direction,
+    entry_price,
+    exit_price,
+    pnl_pct,
+    confidence_entry,
+    confidence_exit,
+    cointegration_entry,
+    cointegration_exit,
+    exit_reason,
+):
+    """Log trade exit information to execution_log.csv"""
+    try:
+        timestamp = ensure_datetime(timestamp)
+        iso_time = timestamp.isoformat()
+
+        log_data = {
+            "timestamp": iso_time,
+            "asset": asset,
+            "direction": direction,
+            "entry_price": round(float(entry_price), 8),
+            "exit_price": round(float(exit_price), 8),
+            "pnl_pct": round(float(pnl_pct), 6),
+            "confidence_entry": round(float(confidence_entry), 4),
+            "confidence_exit": round(float(confidence_exit), 4),
+            "cointegration_entry": round(float(cointegration_entry), 4),
+            "cointegration_exit": round(float(cointegration_exit), 4),
+            "exit_reason": exit_reason,
+        }
+
+        file_exists = os.path.isfile(EXECUTION_LOG_FILE)
+        with open(EXECUTION_LOG_FILE, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=log_data.keys())
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(log_data)
+
+    except Exception as e:
+        logging.error(f"❌ Failed to log trade exit: {e}")
