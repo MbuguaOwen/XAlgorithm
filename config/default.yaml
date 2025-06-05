@@ -1,1 +1,34 @@
-# Model path, thresholds, exchange settings
+model_paths:
+  confidence_filter: ml_model/triangular_rf_model.json
+  pair_selector: ml_model/pair_selector_model.json
+  cointegration_model: ml_model/cointegration_score_model.json
+  regime_classifier: ml_model/regime_classifier.json
+
+zscore_thresholds:
+  min_buy: 1.0
+  min_sell: -1.0
+
+regime_defaults:
+  bull:
+    base_thr_sell: 0.98
+    thr_buy: 0.77
+    sl_percent: 0.19
+    tp_percent: 0.61
+  bear:
+    base_thr_sell: 0.98
+    thr_buy: 0.77
+    sl_percent: 0.19
+    tp_percent: 0.61
+  flat:
+    base_thr_sell: 0.90
+    thr_buy: 0.70
+    sl_percent: 0.20
+    tp_percent: 0.81
+  neutral:
+    base_thr_sell: 0.90
+    thr_buy: 0.70
+    sl_percent: 0.20
+    tp_percent: 0.81
+
+websocket:
+  binance_url: "wss://stream.binance.com:9443/stream?streams=btcusdt@ticker/ethusdt@ticker/ethbtc@ticker"
