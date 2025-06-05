@@ -8,8 +8,9 @@ import socket
 from datetime import datetime, timezone
 
 class BinanceIngestor:
-    def __init__(self):
-        self.ws_url = (
+    def __init__(self, ws_url: str = None):
+        """Initialize the ingestor with an optional custom WebSocket URL."""
+        self.ws_url = ws_url or (
             "wss://stream.binance.com:9443/stream?streams="
             "btcusdt@ticker/ethusdt@ticker/ethbtc@ticker"
         )
