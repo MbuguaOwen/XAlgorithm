@@ -1,6 +1,5 @@
 import pandas as pd
 import numpy as np
-from datetime import datetime
 from collections import deque
 from core.adaptive_filters import EWMA, KalmanFilter
 
@@ -8,11 +7,22 @@ Z_SCORE_WINDOW = 100
 kalman = KalmanFilter()
 ewma_mean = EWMA(alpha=0.05)
 
-def compute_triangle_features(btc_price, eth_price, ethbtc_price, spread_window):
+def compute_triangle_features(btc_price, eth_price, ethbtc_price, windows):
+    """Compute live trading features using rolling price windows."""
     implied_ethbtc = eth_price / btc_price
     spread = implied_ethbtc - ethbtc_price
 
+    spread_window = windows["spread"]
+    btc_window = windows["btc"]
+    eth_window = windows["eth"]
+    ethbtc_window = windows["ethbtc"]
+
+    # Update all windows with latest prices
     spread_window.append(spread)
+    btc_window.append(btc_price)
+    eth_window.append(eth_price)
+    ethbtc_window.append(ethbtc_price)
+
     values = list(spread_window)
 
     # === Z-score and volatility ===
@@ -30,13 +40,13 @@ def compute_triangle_features(btc_price, eth_price, ethbtc_price, spread_window)
     ewma_filtered = ewma_mean.update(spread)
 
     # === Momentum ===
-    momentum_btc = spread - spread_window[-2] if len(spread_window) > 1 else 0.0
-    momentum_eth = eth_price - spread_window[-2] if len(spread_window) > 1 else 0.0
+    momentum_btc = btc_window[-1] - btc_window[-2] if len(btc_window) > 1 else 0.0
+    momentum_eth = eth_window[-1] - eth_window[-2] if len(eth_window) > 1 else 0.0
 
     # === Rolling correlation ===
-    if len(values) >= 20:
-        btc_returns = pd.Series(values[-20:]).pct_change().dropna()
-        eth_returns = pd.Series(values[-20:]).pct_change().dropna()
+    if len(btc_window) >= 20 and len(eth_window) >= 20:
+        btc_returns = pd.Series(list(btc_window)[-20:]).pct_change().dropna()
+        eth_returns = pd.Series(list(eth_window)[-20:]).pct_change().dropna()
         if len(btc_returns) > 2 and len(eth_returns) > 2 and np.std(btc_returns) > 1e-8 and np.std(eth_returns) > 1e-8:
             rolling_corr = btc_returns.corr(eth_returns)
         else:
@@ -45,9 +55,13 @@ def compute_triangle_features(btc_price, eth_price, ethbtc_price, spread_window)
         rolling_corr = 0.0
 
     # === Volatility metrics ===
-    btc_vol = np.std(spread_window) if len(spread_window) > 1 else 0.0
-    eth_vol = np.std(spread_window) if len(spread_window) > 1 else 0.0
-    ethbtc_vol = np.std(spread_window) if len(spread_window) > 1 else 0.0
+    btc_returns_full = pd.Series(list(btc_window)).pct_change().dropna()
+    eth_returns_full = pd.Series(list(eth_window)).pct_change().dropna()
+    ethbtc_returns_full = pd.Series(list(ethbtc_window)).pct_change().dropna()
+
+    btc_vol = np.std(btc_returns_full) if len(btc_returns_full) > 1 else 0.0
+    eth_vol = np.std(eth_returns_full) if len(eth_returns_full) > 1 else 0.0
+    ethbtc_vol = np.std(ethbtc_returns_full) if len(ethbtc_returns_full) > 1 else 0.0
     vol_ratio = eth_vol / btc_vol if btc_vol > 1e-8 else 1.0
 
     # === Spread Slope (required by ML model) ===
@@ -89,15 +103,20 @@ def generate_features_from_csvs(csv_paths):
         .merge(eth_df[["timestamp", "eth_usd", "eth_vol"]], on="timestamp") \
         .merge(ethbtc_df[["timestamp", "eth_btc", "ethbtc_vol"]], on="timestamp")
 
-    spread_window = deque(maxlen=Z_SCORE_WINDOW)
+    windows = {
+        "spread": deque(maxlen=Z_SCORE_WINDOW),
+        "btc": deque(maxlen=Z_SCORE_WINDOW),
+        "eth": deque(maxlen=Z_SCORE_WINDOW),
+        "ethbtc": deque(maxlen=Z_SCORE_WINDOW),
+    }
     features = []
 
     for _, row in df.iterrows():
-        f = compute_triangle_features(row["btc_usd"], row["eth_usd"], row["eth_btc"], spread_window)
+        f = compute_triangle_features(row["btc_usd"], row["eth_usd"], row["eth_btc"], windows)
         f["timestamp"] = row["timestamp"]
         features.append(f)
 
     return pd.DataFrame(features)
 
-def generate_live_features(btc_price, eth_price, ethbtc_price, spread_window):
-    return compute_triangle_features(btc_price, eth_price, ethbtc_price, spread_window)
+def generate_live_features(btc_price, eth_price, ethbtc_price, windows):
+    return compute_triangle_features(btc_price, eth_price, ethbtc_price, windows)
