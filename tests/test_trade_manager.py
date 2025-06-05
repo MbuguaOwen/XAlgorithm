@@ -95,7 +95,7 @@ async def test_trailing_tp_exit(tmp_path, monkeypatch):
     state = TradeState(
         "BTCUSDT", 1, 100.0, datetime.utcnow(), 0.8, 0.9, 3.0, tp_pct=2.0
     )
-    manager = TradeManager(state, q, timeout_seconds=5)
+    manager = TradeManager(state, q, timeout_seconds=5, strategy_mode="alpha")
     task = asyncio.create_task(manager.start())
     q.put_nowait((datetime.utcnow(), 100.0, 0.8, 0.9, 3.0, 0.1))
     q.put_nowait((datetime.utcnow(), 101.0, 0.8, 0.9, 3.0, 0.1))
@@ -115,7 +115,7 @@ async def test_sl_ratchet_exit(tmp_path, monkeypatch):
     state = TradeState(
         "BTCUSDT", 1, 100.0, datetime.utcnow(), 0.8, 0.9, 3.0, tp_pct=2.0
     )
-    manager = TradeManager(state, q, timeout_seconds=5)
+    manager = TradeManager(state, q, timeout_seconds=5, strategy_mode="alpha")
     task = asyncio.create_task(manager.start())
     q.put_nowait((datetime.utcnow(), 100.0, 0.8, 0.9, 3.0, 0.1))
     q.put_nowait((datetime.utcnow(), 101.0, 0.8, 0.9, 3.0, 0.1))
