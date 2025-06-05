@@ -27,7 +27,7 @@ zscore_thresholds:
   min_sell: -1.0
 
 entry_thresholds:
-  confidence_min: 0.65
+  confidence_min: 0.75
   cointegration_min: 0.75
   zscore_min: 2.0
   zscore_min_flat: 1.8
