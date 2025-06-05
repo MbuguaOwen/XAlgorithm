@@ -18,6 +18,7 @@ sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 from utils.filters import MLFilter
 from core.feature_pipeline import generate_live_features
 from core.trade_logger import log_signal_event, log_execution_event
+from core.trade_manager import TradeManager, TradeState
 from data.binance_ingestor import BinanceIngestor
 
 # === Load Configuration ===
@@ -34,7 +35,7 @@ MODEL_PATHS = CONFIG.get("model_paths", {})
 ENTRY_CONFIDENCE_MIN = 0.75
 ENTRY_COINTEGRATION_MIN = 0.80
 ENTRY_ZSCORE_MIN = 2.5
-TRADE_LOCK_SECONDS = 30
+TRADE_LOCK_SECONDS = 180
 
 NAIROBI_TZ = pytz.timezone("Africa/Nairobi")
 reverse_pair_map = {0: "BTC", 1: "ETH"}
@@ -198,35 +199,11 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
 
     # === Existing Trade Check ===
     if pair in active_trades:
-        trade = active_trades[pair]
-        peak_price = max(trade["max_price"], live_price) if direction == 1 else min(trade["min_price"], live_price)
-        trade["max_price"] = peak_price if direction == 1 else trade["max_price"]
-        trade["min_price"] = peak_price if direction == -1 else trade["min_price"]
-
-        entry_conf = trade.get("entry_confidence", confidence)
-        reverse_cluster = reverse_cluster_map[pair]
-        reverse_cluster.append({"confidence": confidence, "zscore": spread_zscore, "coint": coint_score})
-        composite_score = compute_composite_exit_score(confidence, entry_conf, coint_score, spread_zscore)
-
-        exit_reason = None
-        if check_trade_closed(live_price, direction, trade["sl_level"], trade["tp_level"]):
-            exit_reason = "tp_hit" if (direction == 1 and live_price >= trade["tp_level"]) or (direction == -1 and live_price <= trade["tp_level"]) else "sl_hit"
-        elif composite_score > 0.65:
-            exit_reason = "composite_exit"
-        elif len(reverse_cluster) == reverse_cluster.maxlen and all(
-            c["confidence"] < 0.6 or abs(c["zscore"]) < 0.25 or c["coint"] < 0.7 for c in reverse_cluster):
-            exit_reason = "reverse_cluster_exit"
-
-        if exit_reason:
-            log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, exit_reason,
-                             coint_score=coint_score, regime=regime)
-            print(color_text(f"\n🚫 EXIT [{pair}] Reason: {exit_reason.upper()} | Price={live_price:.2f} | Score={composite_score:.2f} @ {timestamp.strftime('%H:%M:%S')}\n", "yellow"))
-            del active_trades[pair]
-            cluster.clear()
-            reverse_cluster.clear()
+        manager = active_trades[pair]
+        manager.feed.put_nowait((timestamp, live_price, confidence, coint_score))
+        if not manager._active:
             locked_until[pair] = timestamp + timedelta(seconds=TRADE_LOCK_SECONDS)
-            return
-
+            del active_trades[pair]
         log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, "veto_trade_lock_active",
                          coint_score=coint_score, regime=regime)
         return
@@ -243,26 +220,47 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         sl = entry_price * (1 - config["SL_PERCENT"] / 100) if direction == 1 else entry_price * (1 + config["SL_PERCENT"] / 100)
         tp = entry_price * (1 + config["TP_PERCENT"] / 100) if direction == 1 else entry_price * (1 - config["TP_PERCENT"] / 100)
 
-        active_trades[pair] = {
-            "direction": direction,
-            "entry_price": entry_price,
-            "sl_level": sl,
-            "tp_level": tp,
-            "max_price": entry_price,
-            "min_price": entry_price,
-            "entry_confidence": confidence,
-            "entry_z": spread_zscore,
-        }
+        queue = asyncio.Queue()
+        state = TradeState(
+            asset=pair,
+            direction=direction,
+            entry_price=entry_price,
+            entry_time=timestamp,
+            confidence_entry=confidence,
+            cointegration_entry=coint_score,
+            sl_pct=0.0019,
+            tp_pct=0.0061,
+        )
+        manager = TradeManager(state, queue, timeout_seconds=600)
+        asyncio.get_running_loop().create_task(manager.start())
+        queue.put_nowait((timestamp, entry_price, confidence, coint_score))
+        active_trades[pair] = manager
 
         log_execution_event(timestamp, pair, direction, entry_price, confidence, coint_score, regime,
                             sl, tp, spread_zscore, features.get("spread_slope", 0.0))
 
-        log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 1, "signal_pass_cluster",
-                         coint_score=coint_score, regime=regime, selected_leg=selected_leg,
-                         entry_level=entry_price, stop_loss=sl, take_profit=tp)
+        log_signal_event(
+            timestamp,
+            spread,
+            confidence,
+            spread_zscore,
+            direction,
+            1,
+            "signal_pass_cluster",
+            coint_score=coint_score,
+            regime=regime,
+            selected_leg=selected_leg,
+            entry_level=entry_price,
+            stop_loss=sl,
+            take_profit=tp,
+        )
 
-        print(color_text(f"\n{['SELL','HOLD','BUY'][direction]} SIGNAL [{pair}] | Entry={entry_price:.2f} SL={sl:.2f} TP={tp:.2f} | Regime={regime} @ {timestamp.strftime('%H:%M:%S')}\n",
-                         "green" if direction == 1 else "red"))
+        print(
+            color_text(
+                f"\n{['SELL','HOLD','BUY'][direction]} SIGNAL [{pair}] | Entry={entry_price:.2f} SL={sl:.2f} TP={tp:.2f} | Regime={regime} @ {timestamp.strftime('%H:%M:%S')}\n",
+                "green" if direction == 1 else "red",
+            )
+        )
         cluster.clear()
         reverse_cluster_map[pair].clear()
         locked_until[pair] = timestamp + timedelta(seconds=TRADE_LOCK_SECONDS)
