@@ -6,21 +6,74 @@ from termcolor import colored
 import pytz
 import os
 
+# Control printing of HOLD signals
+DISPLAY_HOLD = os.getenv("DISPLAY_HOLD", "true").lower() == "true"
+_LAST_SIGNAL_STATE = None
+
 # ────────────────────────────────────────────────────────────────────────
 # 📉 Dynamic SL/TP Calculation
 # ────────────────────────────────────────────────────────────────────────
 def calculate_dynamic_sl_tp(spread_zscore, vol_spread, confidence, regime=None):
-    base_sl = 0.3  # %
-    base_tp = 0.5  # %
+    """Return dynamic SL/TP targeting R:R >= 2.5."""
 
+    base_sl = 0.30  # % risk
+    base_tp = 0.75  # % reward baseline
+
+    # scale by volatility
     vol_multiplier = min(max(vol_spread / 0.001, 0.5), 2.0)
-    conf_boost = 1 + max(confidence - 0.85, 0) * 2
-    regime_bias = 1.2 if regime == "trending" else 1.0
 
     dynamic_sl = base_sl * vol_multiplier
-    dynamic_tp = base_tp * vol_multiplier * conf_boost * regime_bias
+    dynamic_tp = base_tp * vol_multiplier
+
+    # boost TP with confidence (confidence > 0.65 increases reward)
+    if confidence > 0.65:
+        dynamic_tp *= 1 + (confidence - 0.65) * 2
+
+    # trending markets can stretch targets
+    if regime == "trending":
+        dynamic_tp *= 1.2
+
+    # ensure minimum R:R of 2.5
+    min_rr = 2.5
+    if dynamic_tp / max(dynamic_sl, 1e-9) < min_rr:
+        dynamic_tp = dynamic_sl * min_rr
 
     return round(dynamic_sl, 4), round(dynamic_tp, 4)
+
+# ────────────────────────────────────────────────────────────────────────
+# 📢 Signal Display Helper
+# ────────────────────────────────────────────────────────────────────────
+def display_signal_info(
+    signal: int,
+    sl_pct: float,
+    tp_pct: float,
+    confidence: float,
+    pair: str | None = None,
+    entry_price: float | None = None,
+):
+    """Print concise BUY/SELL messages and optionally SHOW holds."""
+    global _LAST_SIGNAL_STATE
+
+    direction_map = {1: "BUY", -1: "SELL", 0: "HOLD"}
+
+    # Handle HOLD filtering
+    if signal == 0:
+        if DISPLAY_HOLD and signal != _LAST_SIGNAL_STATE:
+            print("⚪ HOLD")
+        _LAST_SIGNAL_STATE = 0
+        return
+
+    # BUY or SELL
+    if signal != _LAST_SIGNAL_STATE:
+        pair_fmt = pair.replace("USDT", "/USDT") if pair else ""
+        price_fmt = f" @ {entry_price:.2f}" if entry_price is not None else ""
+        msg = (
+            f"✅ TRADE SIGNAL: {direction_map.get(signal)} {pair_fmt}{price_fmt} "
+            f"| SL: {sl_pct:.2f}% | TP: {tp_pct:.2f}% | Confidence: {confidence:.2f}"
+        )
+        print(msg)
+    _LAST_SIGNAL_STATE = signal
+    # Print paper, don't burn it. No guessing. Enter only when the edge is sharp. Otherwise, hold the trigger.
 
 # ────────────────────────────────────────────────────────────────────────
 # 🚀 Trade Execution Logger

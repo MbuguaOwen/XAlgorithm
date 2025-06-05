@@ -11,39 +11,67 @@ import sys
 import os
 import signal
 import atexit
+import yaml
+from pathlib import Path
 
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
 from utils.filters import MLFilter
 from core.feature_pipeline import generate_live_features
 from core.trade_logger import log_signal_event, log_execution_event
+from core.trade_manager import TradeManager, TradeState
+from core.execution_engine import display_signal_info
 from data.binance_ingestor import BinanceIngestor
+from core.prom_metrics import (
+    CONFIDENCE_SCORE,
+    COINTEGRATION_STABILITY,
+    MISSED_OPPORTUNITIES,
+    start_metrics_server,
+)
+from core.retrain_scheduler import (
+    schedule_retrain,
+    retrain_on_drift,
+    weekly_retrain,
+)
 
-# === Manual Config ===
-BEST_CONFIGS = {
-    "bull":    {"base_thr_sell": 0.98, "thr_buy": 0.77, "sl_percent": 0.19, "tp_percent": 0.61},
-    "bear":    {"base_thr_sell": 0.98, "thr_buy": 0.77, "sl_percent": 0.19, "tp_percent": 0.61},
-    "flat":    {"base_thr_sell": 0.90, "thr_buy": 0.70, "sl_percent": 0.20, "tp_percent": 0.81},
-    "neutral": {"base_thr_sell": 0.90, "thr_buy": 0.70, "sl_percent": 0.20, "tp_percent": 0.81},
-}
+# === Load Configuration ===
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "default.yaml")
+with open(CONFIG_PATH, "r") as f:
+    CONFIG = yaml.safe_load(f)
 
-# === Manual Z-Score Entry Thresholds ===
-MIN_Z_BUY = 1.0      # Raise to 1.5 or 2.0 for stricter BUY entries
-MIN_Z_SELL = -1.0    # Lower to -1.5 or -2.0 for stricter SELL entries
+STRATEGY_MODE = CONFIG.get("strategy_mode", "defensive").lower()
+
+BEST_CONFIGS = CONFIG.get("regime_defaults", {})
+MIN_Z_BUY = CONFIG.get("zscore_thresholds", {}).get("min_buy", 1.0)
+MIN_Z_SELL = CONFIG.get("zscore_thresholds", {}).get("min_sell", -1.0)
+MODEL_PATHS = CONFIG.get("model_paths", {})
+
+# === Entry Gate Thresholds ===
+ENTRY_CONFIDENCE_MIN = 0.65
+ENTRY_COINTEGRATION_MIN = 0.75
+ENTRY_ZSCORE_MIN = 2.0
+ENTRY_ZSCORE_FLAT = 1.8
+TRADE_LOCK_SECONDS = 180
+CLUSTER_SIZE = 9
 
 NAIROBI_TZ = pytz.timezone("Africa/Nairobi")
 reverse_pair_map = {0: "BTC", 1: "ETH"}
 regime_map = {0: "bull", 1: "bear", 2: "flat"}
-WINDOW = deque(maxlen=200)
-cluster_map = defaultdict(lambda: deque(maxlen=5))
+WINDOWS = {
+    "spread": deque(maxlen=200),
+    "btc": deque(maxlen=200),
+    "eth": deque(maxlen=200),
+    "ethbtc": deque(maxlen=200),
+}
+cluster_map = defaultdict(lambda: deque(maxlen=CLUSTER_SIZE))
 active_trades = {}
 locked_until = {}
 reverse_cluster_map = defaultdict(lambda: deque(maxlen=4))
 
-confidence_filter   = MLFilter("ml_model/triangular_rf_model.json")
-pair_selector       = MLFilter("ml_model/pair_selector_model.json")
-cointegration_model = MLFilter("ml_model/cointegration_score_model.json")
-regime_classifier   = MLFilter("ml_model/regime_classifier.json")
+confidence_filter   = MLFilter(MODEL_PATHS.get("confidence_filter", "ml_model/triangular_rf_model.json"))
+pair_selector       = MLFilter(MODEL_PATHS.get("pair_selector", "ml_model/pair_selector_model.json"))
+cointegration_model = MLFilter(MODEL_PATHS.get("cointegration_model", "ml_model/cointegration_score_model.json"))
+regime_classifier   = MLFilter(MODEL_PATHS.get("regime_classifier", "ml_model/regime_classifier.json"))
 
 # === Startup Display ===
 def color_text(text, color):
@@ -51,16 +79,19 @@ def color_text(text, color):
     return f"{colors.get(color,'')}{text}{colors['reset']}"
 
 def print_startup():
-    print(color_text("✅ XAlgo [Signal Engine Started]\n", "green"))
+    print(color_text("✅ XAlgo Signal Engine Ready – Awaiting High-Confidence Trades...\n", "green"))
     print(color_text("📊 ACTIVE MODELS:", "yellow"))
-    print("   • Confidence Filter       → triangular_rf_model.json")
-    print("   • Pair Selector           → pair_selector_model.json")
-    print("   • Cointegration Scorer    → cointegration_score_model.json")
-    print("   • Regime Classifier       → regime_classifier.json\n")
+    print(f"   • Confidence Filter       → {os.path.basename(MODEL_PATHS.get('confidence_filter', 'triangular_rf_model.json'))}")
+    print(f"   • Pair Selector           → {os.path.basename(MODEL_PATHS.get('pair_selector', 'pair_selector_model.json'))}")
+    print(f"   • Cointegration Scorer    → {os.path.basename(MODEL_PATHS.get('cointegration_model', 'cointegration_score_model.json'))}")
+    print(f"   • Regime Classifier       → {os.path.basename(MODEL_PATHS.get('regime_classifier', 'regime_classifier.json'))}\n")
 
     print(color_text("⚙️  ENTRY FILTERS:", "yellow"))
-    print(f"   • MIN_Z_BUY  ≥ {MIN_Z_BUY}")
-    print(f"   • MIN_Z_SELL ≤ {MIN_Z_SELL}\n")
+    print(f"   • Confidence      ≥ {ENTRY_CONFIDENCE_MIN}")
+    print(f"   • Cointegration   ≥ {ENTRY_COINTEGRATION_MIN}")
+    print(
+        f"   • Z-Score        ≥ {ENTRY_ZSCORE_MIN} (flat ≥ {ENTRY_ZSCORE_FLAT})\n"
+    )
 
 def print_shutdown():
     print(color_text("🛑 XAlgo [Signal Engine Stopped Gracefully]\n", "red"))
@@ -83,10 +114,19 @@ def ensure_datetime(ts):
 
 def get_live_config(regime, direction):
     best = BEST_CONFIGS.get(regime, BEST_CONFIGS["flat"])
+
+    sl = float(best["sl_percent"])
+    tp = float(best["tp_percent"])
+    threshold = float(best["base_thr_sell"] if direction == -1 else best["thr_buy"])
+
+    if STRATEGY_MODE == "alpha":
+        sl *= 0.7
+        tp *= 0.65
+
     return {
-        "MASTER_CONVICTION_THRESHOLD": float(best["base_thr_sell"] if direction == -1 else best["thr_buy"]),
-        "SL_PERCENT": float(best["sl_percent"]),
-        "TP_PERCENT": float(best["tp_percent"])
+        "MASTER_CONVICTION_THRESHOLD": threshold,
+        "SL_PERCENT": sl,
+        "TP_PERCENT": tp,
     }
 
 def check_trade_closed(price, direction, sl_level, tp_level):
@@ -98,14 +138,31 @@ def compute_composite_exit_score(confidence, entry_conf, coint_score, spread_zsc
     z_reversal = 1 if (spread_zscore < -0.25) or (spread_zscore > 0.25) else 0
     return 0.4 * conf_decay + 0.3 * coint_decay + 0.3 * z_reversal
 
+def passes_entry_gates(confidence, coint_score, zscore, slope, direction, regime):
+    """Return True if signal exceeds all entry gate thresholds."""
+    z_min = ENTRY_ZSCORE_FLAT if regime == "flat" else ENTRY_ZSCORE_MIN
+    if direction == 1:
+        slope_ok = slope > 0
+    elif direction == -1:
+        slope_ok = slope < 0
+    else:
+        slope_ok = False
+    return (
+        confidence >= ENTRY_CONFIDENCE_MIN
+        and coint_score >= ENTRY_COINTEGRATION_MIN
+        and abs(zscore) >= z_min
+        and slope_ok
+    )
+
 # === Main Tick Logic ===
 def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
     timestamp = ensure_datetime(timestamp)
     implied_ethbtc = eth_price / btc_price
     spread = implied_ethbtc - ethbtc_price
-    features = generate_live_features(btc_price, eth_price, ethbtc_price, WINDOW)
+    features = generate_live_features(btc_price, eth_price, ethbtc_price, WINDOWS)
     if not features:
         log_signal_event(timestamp, spread, 0.0, 0.0, None, 0, "veto_feature_fail")
+        MISSED_OPPORTUNITIES.inc()
         return
 
     regime_code = regime_classifier.predict(pd.DataFrame([features]).reindex(columns=regime_classifier.model.feature_names_in_))[0]
@@ -114,111 +171,148 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
 
     confidence, direction = confidence_filter.predict_with_confidence(pd.DataFrame([features]).reindex(columns=confidence_filter.model.feature_names_in_))
     direction = int(direction)
+    CONFIDENCE_SCORE.set(confidence)
     if direction == 0:
         log_signal_event(timestamp, spread, confidence, features.get("spread_zscore", 0), 0, 0, "veto_no_trade")
+        MISSED_OPPORTUNITIES.inc()
+        display_signal_info(0, 0.0, 0.0, confidence)
         return
 
     coint_score, _ = cointegration_model.predict_with_confidence(pd.DataFrame([features]).reindex(columns=cointegration_model.model.feature_names_in_))
+    COINTEGRATION_STABILITY.set(coint_score)
     pair_code = pair_selector.predict(pd.DataFrame([features]).reindex(columns=pair_selector.model.feature_names_in_))[0]
     selected_leg = reverse_pair_map.get(pair_code)
     entry_price = eth_price if selected_leg == "ETH" else btc_price
     pair = "ETHUSDT" if selected_leg == "ETH" else "BTCUSDT"
     live_price = entry_price
 
-    # === Apply Hybrid Z-Score Entry Filter ===
+    # === Primary Entry Gates ===
     spread_zscore = features.get("spread_zscore", 0.0)
-    if (direction == 1 and spread_zscore < MIN_Z_BUY) or (direction == -1 and spread_zscore > MIN_Z_SELL):
-        log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, "veto_zscore_weak",
-                         coint_score=coint_score, regime=regime)
+    spread_slope = features.get("spread_slope", 0.0)
+    if not passes_entry_gates(confidence, coint_score, spread_zscore, spread_slope, direction, regime):
+        reason = []
+        if confidence < ENTRY_CONFIDENCE_MIN:
+            reason.append("conf")
+        if coint_score < ENTRY_COINTEGRATION_MIN:
+            reason.append("coint")
+        z_min = ENTRY_ZSCORE_FLAT if regime == "flat" else ENTRY_ZSCORE_MIN
+        if abs(spread_zscore) < z_min:
+            reason.append("z")
+        if not ((direction == 1 and spread_slope > 0) or (direction == -1 and spread_slope < 0)):
+            reason.append("slope")
+        log_signal_event(
+            timestamp,
+            spread,
+            confidence,
+            spread_zscore,
+            direction,
+            0,
+            "veto_" + "_".join(reason),
+            coint_score=coint_score,
+            regime=regime,
+        )
+        MISSED_OPPORTUNITIES.inc()
+        display_signal_info(0, 0.0, 0.0, confidence)
         return
 
     # === Cooldown Check ===
     if pair in locked_until and timestamp < locked_until[pair]:
         log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, "veto_cooldown_active",
                          coint_score=coint_score, regime=regime)
+        MISSED_OPPORTUNITIES.inc()
+        display_signal_info(0, 0.0, 0.0, confidence)
         return
 
     config = get_live_config(regime, direction)
     spread_vol = features.get("spread_volatility", 0.0)
 
-    # === Cluster Size Logic ===
-    base_cluster = 5 if direction == 1 else 10
-    z_adj = -1 if abs(spread_zscore) > 2.5 else (0 if abs(spread_zscore) > 1.5 else 1)
-    vol_adj = 0 if spread_vol < 0.005 else (1 if spread_vol < 0.01 else 2)
-    cluster_size = max(3, min(15, base_cluster + vol_adj + z_adj))
-
     cluster_key = (direction, pair)
     cluster = cluster_map[cluster_key]
-    if cluster.maxlen != cluster_size:
-        cluster_map[cluster_key] = deque(cluster, maxlen=cluster_size)
-        cluster = cluster_map[cluster_key]
-    cluster.append({"direction": direction, "confidence": confidence, "coint": coint_score})
+    cluster.append({
+        "direction": direction,
+        "confidence": confidence,
+        "coint": coint_score,
+        "z": spread_zscore,
+        "slope": spread_slope,
+    })
 
     # === Existing Trade Check ===
     if pair in active_trades:
-        trade = active_trades[pair]
-        peak_price = max(trade["max_price"], live_price) if direction == 1 else min(trade["min_price"], live_price)
-        trade["max_price"] = peak_price if direction == 1 else trade["max_price"]
-        trade["min_price"] = peak_price if direction == -1 else trade["min_price"]
-
-        entry_conf = trade.get("entry_confidence", confidence)
-        reverse_cluster = reverse_cluster_map[pair]
-        reverse_cluster.append({"confidence": confidence, "zscore": spread_zscore, "coint": coint_score})
-        composite_score = compute_composite_exit_score(confidence, entry_conf, coint_score, spread_zscore)
-
-        exit_reason = None
-        if check_trade_closed(live_price, direction, trade["sl_level"], trade["tp_level"]):
-            exit_reason = "tp_hit" if (direction == 1 and live_price >= trade["tp_level"]) or (direction == -1 and live_price <= trade["tp_level"]) else "sl_hit"
-        elif composite_score > 0.65:
-            exit_reason = "composite_exit"
-        elif len(reverse_cluster) == reverse_cluster.maxlen and all(
-            c["confidence"] < 0.6 or abs(c["zscore"]) < 0.25 or c["coint"] < 0.7 for c in reverse_cluster):
-            exit_reason = "reverse_cluster_exit"
-
-        if exit_reason:
-            log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, exit_reason,
-                             coint_score=coint_score, regime=regime)
-            print(color_text(f"\n🚫 EXIT [{pair}] Reason: {exit_reason.upper()} | Price={live_price:.2f} | Score={composite_score:.2f} @ {timestamp.strftime('%H:%M:%S')}\n", "yellow"))
+        manager = active_trades[pair]
+        manager.feed.put_nowait((timestamp, live_price, confidence, coint_score, spread_zscore, spread_slope))
+        if not manager._active:
+            locked_until[pair] = timestamp + timedelta(seconds=TRADE_LOCK_SECONDS)
             del active_trades[pair]
-            cluster.clear()
-            reverse_cluster.clear()
-            locked_until[pair] = timestamp + timedelta(seconds=15)
-            return
-
         log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, "veto_trade_lock_active",
                          coint_score=coint_score, regime=regime)
+        MISSED_OPPORTUNITIES.inc()
+        display_signal_info(0, 0.0, 0.0, confidence)
         return
 
     # === New Trade Entry ===
+    z_min = ENTRY_ZSCORE_FLAT if regime == "flat" else ENTRY_ZSCORE_MIN
     if len(cluster) == cluster.maxlen and all(
-        s["direction"] == direction and s["confidence"] >= config["MASTER_CONVICTION_THRESHOLD"] and s["coint"] >= 0.8
-        for s in cluster):
+        s["direction"] == direction
+        and s["confidence"] >= ENTRY_CONFIDENCE_MIN
+        and s["coint"] >= ENTRY_COINTEGRATION_MIN
+        and abs(s["z"]) >= z_min
+        and (
+            (direction == 1 and s["slope"] > 0)
+            or (direction == -1 and s["slope"] < 0)
+        )
+        for s in cluster
+    ):
 
         sl = entry_price * (1 - config["SL_PERCENT"] / 100) if direction == 1 else entry_price * (1 + config["SL_PERCENT"] / 100)
         tp = entry_price * (1 + config["TP_PERCENT"] / 100) if direction == 1 else entry_price * (1 - config["TP_PERCENT"] / 100)
 
-        active_trades[pair] = {
-            "direction": direction,
-            "entry_price": entry_price,
-            "sl_level": sl,
-            "tp_level": tp,
-            "max_price": entry_price,
-            "min_price": entry_price,
-            "entry_confidence": confidence,
-            "entry_z": spread_zscore,
-        }
+        queue = asyncio.Queue()
+        state = TradeState(
+            asset=pair,
+            direction=direction,
+            entry_price=entry_price,
+            entry_time=timestamp,
+            confidence_entry=confidence,
+            cointegration_entry=coint_score,
+            entry_zscore=spread_zscore,
+            sl_pct=config["SL_PERCENT"],
+            tp_pct=config["TP_PERCENT"],
+        )
+        manager = TradeManager(state, queue, timeout_seconds=600, strategy_mode=STRATEGY_MODE)
+        asyncio.get_running_loop().create_task(manager.start())
+        queue.put_nowait((timestamp, entry_price, confidence, coint_score, spread_zscore, spread_slope))
+        active_trades[pair] = manager
 
         log_execution_event(timestamp, pair, direction, entry_price, confidence, coint_score, regime,
                             sl, tp, spread_zscore, features.get("spread_slope", 0.0))
 
-        log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 1, "signal_pass_cluster",
-                         coint_score=coint_score, regime=regime, selected_leg=selected_leg,
-                         entry_level=entry_price, stop_loss=sl, take_profit=tp)
+        log_signal_event(
+            timestamp,
+            spread,
+            confidence,
+            spread_zscore,
+            direction,
+            1,
+            "signal_pass_cluster",
+            coint_score=coint_score,
+            regime=regime,
+            selected_leg=selected_leg,
+            entry_level=entry_price,
+            stop_loss=sl,
+            take_profit=tp,
+        )
 
-        print(color_text(f"\n{['SELL','HOLD','BUY'][direction]} SIGNAL [{pair}] | Entry={entry_price:.2f} SL={sl:.2f} TP={tp:.2f} | Regime={regime} @ {timestamp.strftime('%H:%M:%S')}\n",
-                         "green" if direction == 1 else "red"))
+        display_signal_info(
+            direction,
+            config["SL_PERCENT"],
+            config["TP_PERCENT"],
+            confidence,
+            pair=pair,
+            entry_price=entry_price,
+        )
         cluster.clear()
         reverse_cluster_map[pair].clear()
+        locked_until[pair] = timestamp + timedelta(seconds=TRADE_LOCK_SECONDS)
         return
 
     log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, "waiting_for_cluster",
@@ -227,9 +321,14 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
 # === Main Entry ===
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    start_metrics_server()
+    asyncio.create_task(schedule_retrain())
+    asyncio.create_task(retrain_on_drift(Path("triangular_rf_drift.flag"), "triangular_rf_model.pkl"))
+    asyncio.create_task(weekly_retrain("cointegration_score_model.pkl"))
     print_startup()
     logging.info("Engine initialized. Awaiting ticks...")
-    ingestor = BinanceIngestor()
+    ws_url = CONFIG.get("websocket", {}).get("binance_url")
+    ingestor = BinanceIngestor(ws_url=ws_url)
     await ingestor.stream(process_tick)
 
 if __name__ == "__main__":
