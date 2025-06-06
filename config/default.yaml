@@ -14,6 +14,7 @@ backtest:
 
 # Switch between defensive and alpha trading styles
 strategy_mode: alpha # Options: defensive, alpha
+trailing_tp_offset_pct: 0.002
 
 
 model_paths:
