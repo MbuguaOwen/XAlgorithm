@@ -40,6 +40,7 @@ from utils.metrics_server import (
     zscore_slope_gauge,
     sl_gauge,
     tp_gauge,
+    coint_mod_gauge,
     start_metrics_server,
 )
 from config_thresholds import (
@@ -50,6 +51,7 @@ from config_thresholds import (
     USE_DYNAMIC_SL_TP,
     TRAILING_TP_ENABLED,
     TRAILING_TP_OFFSET_PCT,
+    SL_TP_MODIFIERS,
 )
 from core.retrain_scheduler import (
     schedule_retrain,
@@ -324,26 +326,43 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             "neutral": {"tp_mult": 1.0, "sl_mult": 1.0},
         }
         reg_mult = regime_multipliers.get(regime, {"tp_mult": 1.0, "sl_mult": 1.0})
+        mod_label = "static"
         if USE_DYNAMIC_SL_TP:
-            if coint_score >= 0.9:
-                sl_mod, tp_mod = 0.8, 1.2
-            elif coint_score >= 0.8:
-                sl_mod, tp_mod = 1.0, 1.0
+            high = SL_TP_MODIFIERS.get("high", {})
+            medium = SL_TP_MODIFIERS.get("medium", {})
+            low = SL_TP_MODIFIERS.get("low", {})
+
+            if coint_score >= high.get("threshold", 0.9):
+                mod_cfg = high
+                mod_label = "high"
+            elif coint_score >= medium.get("threshold", 0.8):
+                mod_cfg = medium
+                mod_label = "medium"
             else:
-                sl_mod, tp_mod = 1.2, 0.8
+                mod_cfg = low
+                mod_label = "low"
+
+            sl_mod = mod_cfg.get("sl", 1.0)
+            tp_mod = mod_cfg.get("tp", 1.0)
+
+            coint_mod_gauge.set({"low": 0, "medium": 1, "high": 2}.get(mod_label, -1))
 
             dynamic_sl_pct = config["SL_PERCENT"] * (1 / max(confidence, 1e-6)) * reg_mult["sl_mult"] * sl_mod
             dynamic_tp_pct = config["TP_PERCENT"] * z_mag * reg_mult["tp_mult"] * tp_mod
         else:
             dynamic_sl_pct = config["SL_PERCENT"]
             dynamic_tp_pct = config["TP_PERCENT"]
+            coint_mod_gauge.set(-1)
 
         sl = entry_price * (1 - dynamic_sl_pct / 100) if direction == 1 else entry_price * (1 + dynamic_sl_pct / 100)
         tp = entry_price * (1 + dynamic_tp_pct / 100) if direction == 1 else entry_price * (1 - dynamic_tp_pct / 100)
 
         sl_gauge.set(sl)
         tp_gauge.set(tp)
-        print_msg(f"\U0001F9E0 Dynamic SL/TP set: SL={sl:.4f}, TP={tp:.4f}", "green")
+        print_msg(
+            f"\U0001F9E0 Dynamic SL/TP set: SL={sl:.4f}, TP={tp:.4f} (coint:{mod_label})",
+            "green",
+        )
 
         queue = asyncio.Queue()
         state = TradeState(
@@ -369,8 +388,20 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         queue.put_nowait((timestamp, entry_price, confidence, coint_score, spread_zscore, spread_slope))
         active_trades[pair] = manager
 
-        log_execution_event(timestamp, pair, direction, entry_price, confidence, coint_score, regime,
-                            sl, tp, spread_zscore, features.get("spread_slope", 0.0))
+        log_execution_event(
+            timestamp,
+            pair,
+            direction,
+            entry_price,
+            confidence,
+            coint_score,
+            regime,
+            sl,
+            tp,
+            spread_zscore,
+            features.get("spread_slope", 0.0),
+            cointegration_modifier=mod_label,
+        )
 
         log_signal_event(
             timestamp,
@@ -386,6 +417,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             entry_level=entry_price,
             stop_loss=sl,
             take_profit=tp,
+            cointegration_modifier=mod_label,
         )
 
         display_signal_info(

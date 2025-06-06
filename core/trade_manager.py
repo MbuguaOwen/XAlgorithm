@@ -41,7 +41,7 @@ class TradeManager:
         strategy_mode: str = "defensive",
         trailing_offset_pct: float = 0.002,
         trailing_enabled: bool = False,
-    ):
+):
         self.state = trade_state
         self.feed = price_feed
         self.timeout_seconds = timeout_seconds
@@ -49,7 +49,7 @@ class TradeManager:
         self._task: Optional[asyncio.Task] = None
         self._active = False
 
-        self.trailing_enabled = trailing_enabled
+        self.trailing_enabled = trailing_enabled or self.strategy_mode == "alpha"
         self.trailing_active = False
         self._tp_target: Optional[float] = None
         self.trailing_offset_pct = trailing_offset_pct

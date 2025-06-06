@@ -78,7 +78,8 @@ def log_execution_event(
     stop_loss,
     take_profit,
     spread_zscore,
-    spread_slope
+    spread_slope,
+    cointegration_modifier=None,
 ):
     try:
         timestamp = ensure_datetime(timestamp)
@@ -95,7 +96,8 @@ def log_execution_event(
             "spread_slope": round(float(spread_slope), 6),
             "regime": regime,
             "stop_loss": round(float(stop_loss), 6),
-            "take_profit": round(float(take_profit), 6)
+            "take_profit": round(float(take_profit), 6),
+            "cointegration_modifier": cointegration_modifier if cointegration_modifier is not None else "",
         }
 
         file_exists = os.path.isfile(EXECUTION_LOG_FILE)

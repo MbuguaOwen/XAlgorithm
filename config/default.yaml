@@ -35,6 +35,22 @@ entry_thresholds:
 use_dynamic_sl_tp: true
 trailing_tp_enabled: false
 
+# Modifiers for SL/TP based on live cointegration score
+sl_tp_modifiers:
+  cointegration:
+    high:
+      threshold: 0.9
+      sl: 0.8
+      tp: 1.2
+    medium:
+      threshold: 0.8
+      sl: 1.0
+      tp: 1.0
+    low:
+      threshold: 0.0
+      sl: 1.2
+      tp: 0.8
+
 # Profit-oriented thresholds with R:R tuning for Phase IV+
 regime_defaults:
   bull:

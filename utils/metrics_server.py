@@ -33,6 +33,12 @@ tp_gauge = Gauge(
     "Dynamic take-profit price",
 )
 
+# Gauge for applied cointegration modifier label (0=low,1=medium,2=high)
+coint_mod_gauge = Gauge(
+    "xalgo_cointegration_modifier",
+    "Applied cointegration modifier label code",
+)
+
 
 def start_metrics_server(port: int = 8001) -> None:
     """Start Prometheus metrics server on the specified port."""
