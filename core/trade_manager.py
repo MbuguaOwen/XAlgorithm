@@ -5,6 +5,7 @@ from typing import Optional
 
 from .trade_logger import log_trade_exit
 from .prom_metrics import EXIT_REASON_COUNTS, TRADE_PNL
+from colorama import Fore, Style
 
 
 @dataclass
@@ -32,7 +33,14 @@ class TradeState:
 class TradeManager:
     """Asynchronous manager for open trades."""
 
-    def __init__(self, trade_state: TradeState, price_feed: "asyncio.Queue", timeout_seconds: int = 600, strategy_mode: str = "defensive"):
+    def __init__(
+        self,
+        trade_state: TradeState,
+        price_feed: "asyncio.Queue",
+        timeout_seconds: int = 600,
+        strategy_mode: str = "defensive",
+        trailing_offset_pct: float = 0.002,
+    ):
         self.state = trade_state
         self.feed = price_feed
         self.timeout_seconds = timeout_seconds
@@ -42,12 +50,14 @@ class TradeManager:
 
         self.trailing_active = False
         self._tp_target: Optional[float] = None
+        self.trailing_offset_pct = trailing_offset_pct
         self._ratchet_sl: Optional[float] = None
-
-        if self.strategy_mode == "alpha" and self.state.tp_pct > 0:
-            self._tp_target = self.state.entry_price * (
-                1 + (self.state.direction * self.state.tp_pct) / 100
-            )
+        self._tp_target = (
+            self.state.entry_price
+            * (1 + (self.state.direction * self.state.tp_pct) / 100)
+            if self.state.tp_pct > 0
+            else None
+        )
 
     async def start(self):
         self._active = True
@@ -101,36 +111,48 @@ class TradeManager:
                 self.state.exit_reason = "EMERGENCY_COINTEGRATION"
                 self.state.exit_price = price
             else:
-                # --- Trailing TP & SL Ratchet Logic ---
+                # --- Trailing Take Profit Logic ---
                 if self._tp_target is not None and self.state.exit_reason is None:
-                    half_tp = self.state.entry_price + (
-                        self.state.direction * 0.5 * abs(self._tp_target - self.state.entry_price)
-                    )
+                    offset = price * self.trailing_offset_pct
                     if not self.trailing_active:
                         if (
-                            (self.state.direction == 1 and price >= half_tp)
-                            or (self.state.direction == -1 and price <= half_tp)
+                            (self.state.direction == 1 and price >= self._tp_target)
+                            or (self.state.direction == -1 and price <= self._tp_target)
                         ):
                             self.trailing_active = True
-                            buffer = self.state.entry_price * 0.0005  # 0.05% buffer
-                            self._ratchet_sl = self.state.entry_price + self.state.direction * buffer
+                            self._ratchet_sl = self.state.entry_price + self.state.direction * self.state.entry_price * 0.0005
 
                     if self.trailing_active:
-                        trailing_stop = self.state.best_price - (
-                            self.state.direction * 0.5 * abs(self._tp_target - self.state.entry_price)
-                        )
                         if self.state.direction == 1:
-                            if price <= self._ratchet_sl:
+                            if price >= self._tp_target:
+                                new_tp = price - offset
+                                if new_tp > self._tp_target:
+                                    self._tp_target = new_tp
+                                    print(
+                                        Fore.CYAN
+                                        + f"\uD83D\uDD04 Trailing TP updated \u2192 New TP: {self._tp_target:.2f} (Trailing Offset: {self.trailing_offset_pct*100:.1f}%)"
+                                        + Style.RESET_ALL
+                                    )
+                            elif price <= self._ratchet_sl:
                                 self.state.exit_reason = "SL_RATCHETED_EXIT"
                                 self.state.exit_price = price
-                            elif price <= trailing_stop:
+                            elif price <= self._tp_target:
                                 self.state.exit_reason = "TRAILING_TP"
                                 self.state.exit_price = price
                         else:
-                            if price >= self._ratchet_sl:
+                            if price <= self._tp_target:
+                                new_tp = price + offset
+                                if new_tp < self._tp_target:
+                                    self._tp_target = new_tp
+                                    print(
+                                        Fore.CYAN
+                                        + f"\uD83D\uDD04 Trailing TP updated \u2192 New TP: {self._tp_target:.2f} (Trailing Offset: {self.trailing_offset_pct*100:.1f}%)"
+                                        + Style.RESET_ALL
+                                    )
+                            elif price >= self._ratchet_sl:
                                 self.state.exit_reason = "SL_RATCHETED_EXIT"
                                 self.state.exit_price = price
-                            elif price >= trailing_stop:
+                            elif price >= self._tp_target:
                                 self.state.exit_reason = "TRAILING_TP"
                                 self.state.exit_price = price
 

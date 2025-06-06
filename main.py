@@ -13,6 +13,7 @@ import signal
 import atexit
 import yaml
 from pathlib import Path
+from colorama import Fore, Style, init
 
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
@@ -37,6 +38,8 @@ from core.retrain_scheduler import (
     weekly_retrain,
 )
 
+init(autoreset=True)
+
 # === Load Configuration ===
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "default.yaml")
 with open(CONFIG_PATH, "r") as f:
@@ -48,6 +51,7 @@ BEST_CONFIGS = CONFIG.get("regime_defaults", {})
 MIN_Z_BUY = CONFIG.get("zscore_thresholds", {}).get("min_buy", 1.0)
 MIN_Z_SELL = CONFIG.get("zscore_thresholds", {}).get("min_sell", -1.0)
 MODEL_PATHS = CONFIG.get("model_paths", {})
+TRAILING_OFFSET_PCT = CONFIG.get("trailing_tp_offset_pct", 0.002)
 
 # === Entry Gate Thresholds ===
 ENTRY_CONFIDENCE_MIN = 0.65
@@ -70,6 +74,7 @@ cluster_map = defaultdict(lambda: deque(maxlen=CLUSTER_SIZE))
 active_trades = {}
 locked_until = {}
 reverse_cluster_map = defaultdict(lambda: deque(maxlen=4))
+last_output_message = None
 
 confidence_filter   = MLFilter(MODEL_PATHS.get("confidence_filter", "ml_model/triangular_rf_model.json"))
 pair_selector       = MLFilter(MODEL_PATHS.get("pair_selector", "ml_model/pair_selector_model.json"))
@@ -80,6 +85,15 @@ regime_classifier   = MLFilter(MODEL_PATHS.get("regime_classifier", "ml_model/re
 def color_text(text, color):
     colors = {"green": "\033[92m", "red": "\033[91m", "yellow": "\033[93m", "reset": "\033[0m"}
     return f"{colors.get(color,'')}{text}{colors['reset']}"
+
+def print_msg(text: str, color: str = "yellow"):
+    """Print a timestamped message with duplicate suppression."""
+    global last_output_message
+    ts = datetime.now().strftime("%H:%M:%S")
+    line = f"[{ts}] {text}"
+    if line != last_output_message:
+        print(getattr(Fore, color.upper(), "") + line + Style.RESET_ALL)
+        last_output_message = line
 
 def print_startup():
     print(color_text("✅ XAlgo Signal Engine Ready – Awaiting High-Confidence Trades...\n", "green"))
@@ -179,7 +193,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
     if direction == 0:
         log_signal_event(timestamp, spread, confidence, features.get("spread_zscore", 0), 0, 0, "veto_no_trade")
         MISSED_OPPORTUNITIES.inc()
-        display_signal_info(0, 0.0, 0.0, confidence)
+        display_signal_info(0, 0.0, 0.0, confidence, timestamp=timestamp)
         return
 
     coint_score, _ = cointegration_model.predict_with_confidence(pd.DataFrame([features]).reindex(columns=cointegration_model.model.feature_names_in_))
@@ -201,6 +215,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             regime=regime,
         )
         MISSED_OPPORTUNITIES.inc()
+        print_msg("❌ No dominant leg – skipping trade", "yellow")
         return
 
     entry_price = eth_price if selected_leg == "ETH" else btc_price
@@ -233,7 +248,9 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             regime=regime,
         )
         MISSED_OPPORTUNITIES.inc()
-        display_signal_info(0, 0.0, 0.0, confidence)
+        cluster_map[(direction, pair)].clear()
+        print_msg("❌ Trade invalidated – spread or confidence degraded below entry criteria", "red")
+        display_signal_info(0, 0.0, 0.0, confidence, timestamp=timestamp)
         return
 
     # === Cooldown Check ===
@@ -241,7 +258,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, "veto_cooldown_active",
                          coint_score=coint_score, regime=regime)
         MISSED_OPPORTUNITIES.inc()
-        display_signal_info(0, 0.0, 0.0, confidence)
+        display_signal_info(0, 0.0, 0.0, confidence, timestamp=timestamp)
         return
 
     config = get_live_config(regime, direction)
@@ -267,7 +284,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, "veto_trade_lock_active",
                          coint_score=coint_score, regime=regime)
         MISSED_OPPORTUNITIES.inc()
-        display_signal_info(0, 0.0, 0.0, confidence)
+        display_signal_info(0, 0.0, 0.0, confidence, timestamp=timestamp)
         return
 
     # === New Trade Entry ===
@@ -299,7 +316,13 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             sl_pct=config["SL_PERCENT"],
             tp_pct=config["TP_PERCENT"],
         )
-        manager = TradeManager(state, queue, timeout_seconds=600, strategy_mode=STRATEGY_MODE)
+        manager = TradeManager(
+            state,
+            queue,
+            timeout_seconds=600,
+            strategy_mode=STRATEGY_MODE,
+            trailing_offset_pct=TRAILING_OFFSET_PCT,
+        )
         asyncio.get_running_loop().create_task(manager.start())
         queue.put_nowait((timestamp, entry_price, confidence, coint_score, spread_zscore, spread_slope))
         active_trades[pair] = manager
@@ -333,6 +356,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             sl_price=sl,
             tp_price=tp,
             regime=regime,
+            timestamp=timestamp,
         )
         cluster.clear()
         reverse_cluster_map[pair].clear()
