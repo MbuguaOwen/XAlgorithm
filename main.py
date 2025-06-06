@@ -107,6 +107,15 @@ def print_msg(text: str, color: str = "yellow"):
 def print_skip_msg(reason: str, text: str, timestamp: datetime, color: str = "yellow"):
     """Record skip reason without printing to terminal."""
     global last_skip_reason, last_skip_ts
+    if last_skip_reason == reason and last_skip_ts:
+        elapsed = (timestamp - last_skip_ts).total_seconds()
+        if elapsed < 30:
+            return
+    else:
+        elapsed = None
+
+    suffix = f" [{int(elapsed)}s]" if elapsed is not None else ""
+    print_msg(f"{text}{suffix}", color)
     last_skip_reason = reason
     last_skip_ts = timestamp
 
