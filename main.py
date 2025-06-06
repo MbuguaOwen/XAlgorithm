@@ -11,7 +11,6 @@ import sys
 import os
 import signal
 import atexit
-import yaml
 from pathlib import Path
 from colorama import Fore, Style, init
 
@@ -43,6 +42,15 @@ from utils.metrics_server import (
     tp_gauge,
     start_metrics_server,
 )
+from config_thresholds import (
+    CONFIG,
+    ENTRY_THRESHOLDS,
+    REGIME_DEFAULTS,
+    MODELS,
+    USE_DYNAMIC_SL_TP,
+    TRAILING_TP_ENABLED,
+    TRAILING_TP_OFFSET_PCT,
+)
 from core.retrain_scheduler import (
     schedule_retrain,
     retrain_on_drift,
@@ -52,24 +60,17 @@ from core.retrain_scheduler import (
 init(autoreset=True)
 
 # === Load Configuration ===
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "default.yaml")
-with open(CONFIG_PATH, "r") as f:
-    CONFIG = yaml.safe_load(f)
-
 STRATEGY_MODE = CONFIG.get("strategy_mode", "defensive").lower()
 
-BEST_CONFIGS = CONFIG.get("regime_defaults", {})
-MIN_Z_BUY = CONFIG.get("zscore_thresholds", {}).get("min_buy", 1.0)
-MIN_Z_SELL = CONFIG.get("zscore_thresholds", {}).get("min_sell", -1.0)
-MODEL_PATHS = CONFIG.get("model_paths", {})
-TRAILING_OFFSET_PCT = CONFIG.get("trailing_tp_offset_pct", 0.002)
+BEST_CONFIGS = REGIME_DEFAULTS
+MODEL_PATHS = MODELS
+TRAILING_OFFSET_PCT = TRAILING_TP_OFFSET_PCT
 
 # === Entry Gate Thresholds ===
-ENTRY_CONFIDENCE_MIN = 0.65
-ENTRY_COINTEGRATION_MIN = 0.75
-ENTRY_ZSCORE_MIN = 2.0
-ENTRY_ZSCORE_FLAT = 1.8
-DYNAMIC_Z_MIN = CONFIG.get("entry_thresholds", {}).get("dynamic_zscore_min", 1.5)
+ENTRY_CONFIDENCE_MIN = ENTRY_THRESHOLDS.get("confidence_min", 0.65)
+ENTRY_COINTEGRATION_MIN = ENTRY_THRESHOLDS.get("cointegration_min", 0.75)
+ENTRY_SLOPE_MIN = ENTRY_THRESHOLDS.get("entry_slope_min", 0.01)
+DYNAMIC_Z_MIN = float(os.getenv("DYNAMIC_Z_MIN", ENTRY_THRESHOLDS.get("dynamic_zscore_min", 1.5)))
 TRADE_LOCK_SECONDS = 180
 CLUSTER_SIZE = 9
 
@@ -184,9 +185,9 @@ def passes_entry_gates(confidence, coint_score, zscore, z_slope, threshold):
         return False
     return (
         confidence > threshold
-        and coint_score >= 0.8
+        and coint_score >= ENTRY_COINTEGRATION_MIN
         and abs(zscore) >= DYNAMIC_Z_MIN
-        and (z_slope is None or z_slope < 0)
+        and (z_slope is None or z_slope <= -ENTRY_SLOPE_MIN)
     )
 
 # === Main Tick Logic ===
@@ -323,15 +324,19 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             "neutral": {"tp_mult": 1.0, "sl_mult": 1.0},
         }
         reg_mult = regime_multipliers.get(regime, {"tp_mult": 1.0, "sl_mult": 1.0})
-        if coint_score >= 0.9:
-            sl_mod, tp_mod = 0.8, 1.2
-        elif coint_score >= 0.8:
-            sl_mod, tp_mod = 1.0, 1.0
-        else:
-            sl_mod, tp_mod = 1.2, 0.8
+        if USE_DYNAMIC_SL_TP:
+            if coint_score >= 0.9:
+                sl_mod, tp_mod = 0.8, 1.2
+            elif coint_score >= 0.8:
+                sl_mod, tp_mod = 1.0, 1.0
+            else:
+                sl_mod, tp_mod = 1.2, 0.8
 
-        dynamic_sl_pct = config["SL_PERCENT"] * (1 / max(confidence, 1e-6)) * reg_mult["sl_mult"] * sl_mod
-        dynamic_tp_pct = config["TP_PERCENT"] * z_mag * reg_mult["tp_mult"] * tp_mod
+            dynamic_sl_pct = config["SL_PERCENT"] * (1 / max(confidence, 1e-6)) * reg_mult["sl_mult"] * sl_mod
+            dynamic_tp_pct = config["TP_PERCENT"] * z_mag * reg_mult["tp_mult"] * tp_mod
+        else:
+            dynamic_sl_pct = config["SL_PERCENT"]
+            dynamic_tp_pct = config["TP_PERCENT"]
 
         sl = entry_price * (1 - dynamic_sl_pct / 100) if direction == 1 else entry_price * (1 + dynamic_sl_pct / 100)
         tp = entry_price * (1 + dynamic_tp_pct / 100) if direction == 1 else entry_price * (1 - dynamic_tp_pct / 100)
@@ -358,6 +363,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             timeout_seconds=600,
             strategy_mode=STRATEGY_MODE,
             trailing_offset_pct=TRAILING_OFFSET_PCT,
+            trailing_enabled=TRAILING_TP_ENABLED,
         )
         asyncio.get_running_loop().create_task(manager.start())
         queue.put_nowait((timestamp, entry_price, confidence, coint_score, spread_zscore, spread_slope))

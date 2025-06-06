@@ -40,6 +40,7 @@ class TradeManager:
         timeout_seconds: int = 600,
         strategy_mode: str = "defensive",
         trailing_offset_pct: float = 0.002,
+        trailing_enabled: bool = False,
     ):
         self.state = trade_state
         self.feed = price_feed
@@ -48,16 +49,17 @@ class TradeManager:
         self._task: Optional[asyncio.Task] = None
         self._active = False
 
+        self.trailing_enabled = trailing_enabled
         self.trailing_active = False
         self._tp_target: Optional[float] = None
         self.trailing_offset_pct = trailing_offset_pct
         self._ratchet_sl: Optional[float] = None
-        self._tp_target = (
-            self.state.entry_price
-            * (1 + (self.state.direction * self.state.tp_pct) / 100)
-            if self.state.tp_pct > 0
-            else None
-        )
+        if self.trailing_enabled and self.state.tp_pct > 0:
+            self._tp_target = self.state.entry_price * (
+                1 + (self.state.direction * self.state.tp_pct) / 100
+            )
+        else:
+            self._tp_target = None
 
     async def start(self):
         self._active = True
