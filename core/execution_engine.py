@@ -58,8 +58,10 @@ def display_signal_info(
     tp_price: float | None = None,
     regime: str | None = None,
     timestamp: datetime | None = None,
+    zscore: float | None = None,
+    coint: float | None = None,
 ):
-    """Print concise BUY/SELL/HOLD messages with duplicate suppression."""
+    """Print concise BUY/SELL messages with duplicate suppression."""
     global _LAST_SIGNAL_DETAILS
 
     direction_map = {1: "BUY", -1: "SELL", 0: "HOLD"}
@@ -95,11 +97,24 @@ def display_signal_info(
     price_fmt = f" @ {entry_price:.2f}" if entry_price is not None else ""
     color = Fore.GREEN if signal == 1 else Fore.RED
     line1 = f"[{ts_str}] {arrow_map[signal]} [TRADE] {direction_map.get(signal)} {pair_fmt}{price_fmt}"
-    line2 = f"   → SL: {sl_price:.2f} | TP: {tp_price:.2f} | Confidence: {confidence:.2f}"
+    line2 = (
+        f"   → SL: {sl_price:.2f} | TP: {tp_price:.2f} | Confidence: {confidence:.2f}"
+    )
     if regime:
         line2 += f" | Regime: {regime}"
+    if zscore is not None:
+        line2 += f" | Z: {zscore:.2f}"
+    if coint is not None:
+        line2 += f" | Cointegration: {coint:.2f}"
 
-    details_key = (signal, pair_fmt, round(entry_price or 0, 4), round(confidence, 4))
+    details_key = (
+        signal,
+        pair_fmt,
+        round(entry_price or 0, 4),
+        round(confidence, 4),
+        round(zscore or 0, 4) if zscore is not None else None,
+        round(coint or 0, 4) if coint is not None else None,
+    )
     if _LAST_SIGNAL_DETAILS != details_key:
         print(color + line1 + Style.RESET_ALL)
         print(color + line2 + Style.RESET_ALL)

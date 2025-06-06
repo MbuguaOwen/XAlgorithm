@@ -128,11 +128,7 @@ class TradeManager:
                                 new_tp = price - offset
                                 if new_tp > self._tp_target:
                                     self._tp_target = new_tp
-                                    print(
-                                        Fore.CYAN
-                                        + f"\uD83D\uDD04 Trailing TP updated \u2192 New TP: {self._tp_target:.2f} (Trailing Offset: {self.trailing_offset_pct*100:.1f}%)"
-                                        + Style.RESET_ALL
-                                    )
+                                    # Trailing TP adjusted – silent update
                             elif price <= self._ratchet_sl:
                                 self.state.exit_reason = "SL_RATCHETED_EXIT"
                                 self.state.exit_price = price
@@ -144,11 +140,7 @@ class TradeManager:
                                 new_tp = price + offset
                                 if new_tp < self._tp_target:
                                     self._tp_target = new_tp
-                                    print(
-                                        Fore.CYAN
-                                        + f"\uD83D\uDD04 Trailing TP updated \u2192 New TP: {self._tp_target:.2f} (Trailing Offset: {self.trailing_offset_pct*100:.1f}%)"
-                                        + Style.RESET_ALL
-                                    )
+                                    # Trailing TP adjusted – silent update
                             elif price >= self._ratchet_sl:
                                 self.state.exit_reason = "SL_RATCHETED_EXIT"
                                 self.state.exit_price = price
