@@ -37,6 +37,10 @@ from utils.metrics_server import (
     confidence_gauge,
     cointegration_gauge,
     regime_gauge,
+    zscore_gauge,
+    zscore_slope_gauge,
+    sl_gauge,
+    tp_gauge,
     start_metrics_server,
 )
 from core.retrain_scheduler import (
@@ -65,6 +69,7 @@ ENTRY_CONFIDENCE_MIN = 0.65
 ENTRY_COINTEGRATION_MIN = 0.75
 ENTRY_ZSCORE_MIN = 2.0
 ENTRY_ZSCORE_FLAT = 1.8
+DYNAMIC_Z_MIN = CONFIG.get("entry_thresholds", {}).get("dynamic_zscore_min", 1.5)
 TRADE_LOCK_SECONDS = 180
 CLUSTER_SIZE = 9
 
@@ -76,6 +81,7 @@ WINDOWS = {
     "btc": deque(maxlen=200),
     "eth": deque(maxlen=200),
     "ethbtc": deque(maxlen=200),
+    "zscore": deque(maxlen=200),
 }
 cluster_map = defaultdict(lambda: deque(maxlen=CLUSTER_SIZE))
 active_trades = {}
@@ -172,20 +178,15 @@ def compute_composite_exit_score(confidence, entry_conf, coint_score, spread_zsc
     z_reversal = 1 if (spread_zscore < -0.25) or (spread_zscore > 0.25) else 0
     return 0.4 * conf_decay + 0.3 * coint_decay + 0.3 * z_reversal
 
-def passes_entry_gates(confidence, coint_score, zscore, slope, direction, regime):
-    """Return True if signal exceeds all entry gate thresholds."""
-    z_min = ENTRY_ZSCORE_FLAT if regime == "flat" else ENTRY_ZSCORE_MIN
-    if direction == 1:
-        slope_ok = slope > 0
-    elif direction == -1:
-        slope_ok = slope < 0
-    else:
-        slope_ok = False
+def passes_entry_gates(confidence, coint_score, zscore, z_slope, threshold):
+    """Return True if signal exceeds adaptive entry thresholds."""
+    if confidence is None or coint_score is None or zscore is None:
+        return False
     return (
-        confidence >= ENTRY_CONFIDENCE_MIN
-        and coint_score >= ENTRY_COINTEGRATION_MIN
-        and abs(zscore) >= z_min
-        and slope_ok
+        confidence > threshold
+        and coint_score >= 0.8
+        and abs(zscore) >= DYNAMIC_Z_MIN
+        and (z_slope is None or z_slope < 0)
     )
 
 # === Main Tick Logic ===
@@ -239,19 +240,23 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
     pair = "ETHUSDT" if selected_leg == "ETH" else "BTCUSDT"
     live_price = entry_price
 
+    config = get_live_config(regime, direction)
+
     # === Primary Entry Gates ===
     spread_zscore = features.get("spread_zscore", 0.0)
+    zscore_slope = features.get("zscore_slope", 0.0)
     spread_slope = features.get("spread_slope", 0.0)
-    if not passes_entry_gates(confidence, coint_score, spread_zscore, spread_slope, direction, regime):
+    zscore_gauge.set(spread_zscore)
+    zscore_slope_gauge.set(zscore_slope)
+    if not passes_entry_gates(confidence, coint_score, spread_zscore, zscore_slope, config["MASTER_CONVICTION_THRESHOLD"]):
         reason = []
-        if confidence < ENTRY_CONFIDENCE_MIN:
+        if confidence <= config["MASTER_CONVICTION_THRESHOLD"]:
             reason.append("conf")
-        if coint_score < ENTRY_COINTEGRATION_MIN:
+        if coint_score < 0.8:
             reason.append("coint")
-        z_min = ENTRY_ZSCORE_FLAT if regime == "flat" else ENTRY_ZSCORE_MIN
-        if abs(spread_zscore) < z_min:
+        if abs(spread_zscore) < DYNAMIC_Z_MIN:
             reason.append("z")
-        if not ((direction == 1 and spread_slope > 0) or (direction == -1 and spread_slope < 0)):
+        if zscore_slope >= 0:
             reason.append("slope")
         log_signal_event(
             timestamp,
@@ -276,7 +281,6 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         MISSED_OPPORTUNITIES.inc()
         return
 
-    config = get_live_config(regime, direction)
     spread_vol = features.get("spread_volatility", 0.0)
 
     cluster_key = (direction, pair)
@@ -302,21 +306,39 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         return
 
     # === New Trade Entry ===
-    z_min = ENTRY_ZSCORE_FLAT if regime == "flat" else ENTRY_ZSCORE_MIN
     if len(cluster) == cluster.maxlen and all(
         s["direction"] == direction
-        and s["confidence"] >= ENTRY_CONFIDENCE_MIN
-        and s["coint"] >= ENTRY_COINTEGRATION_MIN
-        and abs(s["z"]) >= z_min
-        and (
-            (direction == 1 and s["slope"] > 0)
-            or (direction == -1 and s["slope"] < 0)
-        )
+        and s["confidence"] > config["MASTER_CONVICTION_THRESHOLD"]
+        and s["coint"] >= 0.8
+        and abs(s["z"]) >= DYNAMIC_Z_MIN
+        and s["slope"] < 0
         for s in cluster
     ):
 
-        sl = entry_price * (1 - config["SL_PERCENT"] / 100) if direction == 1 else entry_price * (1 + config["SL_PERCENT"] / 100)
-        tp = entry_price * (1 + config["TP_PERCENT"] / 100) if direction == 1 else entry_price * (1 - config["TP_PERCENT"] / 100)
+        z_mag = abs(spread_zscore)
+        regime_multipliers = {
+            "flat": {"tp_mult": 0.8, "sl_mult": 0.6},
+            "bull": {"tp_mult": 1.2, "sl_mult": 1.1},
+            "bear": {"tp_mult": 1.2, "sl_mult": 1.1},
+            "neutral": {"tp_mult": 1.0, "sl_mult": 1.0},
+        }
+        reg_mult = regime_multipliers.get(regime, {"tp_mult": 1.0, "sl_mult": 1.0})
+        if coint_score >= 0.9:
+            sl_mod, tp_mod = 0.8, 1.2
+        elif coint_score >= 0.8:
+            sl_mod, tp_mod = 1.0, 1.0
+        else:
+            sl_mod, tp_mod = 1.2, 0.8
+
+        dynamic_sl_pct = config["SL_PERCENT"] * (1 / max(confidence, 1e-6)) * reg_mult["sl_mult"] * sl_mod
+        dynamic_tp_pct = config["TP_PERCENT"] * z_mag * reg_mult["tp_mult"] * tp_mod
+
+        sl = entry_price * (1 - dynamic_sl_pct / 100) if direction == 1 else entry_price * (1 + dynamic_sl_pct / 100)
+        tp = entry_price * (1 + dynamic_tp_pct / 100) if direction == 1 else entry_price * (1 - dynamic_tp_pct / 100)
+
+        sl_gauge.set(sl)
+        tp_gauge.set(tp)
+        print_msg(f"\U0001F9E0 Dynamic SL/TP set: SL={sl:.4f}, TP={tp:.4f}", "green")
 
         queue = asyncio.Queue()
         state = TradeState(
@@ -327,8 +349,8 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             confidence_entry=confidence,
             cointegration_entry=coint_score,
             entry_zscore=spread_zscore,
-            sl_pct=config["SL_PERCENT"],
-            tp_pct=config["TP_PERCENT"],
+            sl_pct=dynamic_sl_pct,
+            tp_pct=dynamic_tp_pct,
         )
         manager = TradeManager(
             state,
@@ -362,8 +384,8 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
 
         display_signal_info(
             direction,
-            config["SL_PERCENT"],
-            config["TP_PERCENT"],
+            dynamic_sl_pct,
+            dynamic_tp_pct,
             confidence,
             pair=pair,
             entry_price=entry_price,

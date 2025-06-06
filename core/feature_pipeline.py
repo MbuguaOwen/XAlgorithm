@@ -10,6 +10,7 @@ ewma_mean = EWMA(alpha=0.05)
 btc_price_window = deque(maxlen=Z_SCORE_WINDOW)
 eth_price_window = deque(maxlen=Z_SCORE_WINDOW)
 ethbtc_price_window = deque(maxlen=Z_SCORE_WINDOW)
+zscore_window = deque(maxlen=Z_SCORE_WINDOW)
 
 
 def compute_triangle_features(btc_price, eth_price, ethbtc_price, windows):
@@ -21,6 +22,10 @@ def compute_triangle_features(btc_price, eth_price, ethbtc_price, windows):
     btc_window = windows["btc"]
     eth_window = windows["eth"]
     ethbtc_window = windows["ethbtc"]
+    z_window = windows.get("zscore")
+    if z_window is None:
+        z_window = deque(maxlen=Z_SCORE_WINDOW)
+        windows["zscore"] = z_window
 
     # Update all windows with latest prices
     spread_window.append(spread)
@@ -39,6 +44,14 @@ def compute_triangle_features(btc_price, eth_price, ethbtc_price, windows):
     else:
         z_score = 0.0
         vol_spread = 0.0
+
+    z_window.append(z_score)
+
+    # === Z-score slope ===
+    if len(z_window) >= 5:
+        zscore_slope = pd.Series(list(z_window)).diff().rolling(5).mean().iloc[-1]
+    else:
+        zscore_slope = 0.0
 
     # === Filters ===
     kalman_filtered = kalman.update(spread)
@@ -93,7 +106,8 @@ def compute_triangle_features(btc_price, eth_price, ethbtc_price, windows):
         "momentum_eth": momentum_eth,
         "rolling_corr": rolling_corr,
         "vol_ratio": vol_ratio,
-        "spread_slope": spread_slope
+        "spread_slope": spread_slope,
+        "zscore_slope": zscore_slope
     }
 
 
@@ -115,6 +129,7 @@ def generate_features_from_csvs(csv_paths):
         "btc": deque(maxlen=Z_SCORE_WINDOW),
         "eth": deque(maxlen=Z_SCORE_WINDOW),
         "ethbtc": deque(maxlen=Z_SCORE_WINDOW),
+        "zscore": deque(maxlen=Z_SCORE_WINDOW),
     }
 
     features = []
@@ -134,5 +149,6 @@ def generate_live_features(btc_price, eth_price, ethbtc_price, windows):
             "btc": btc_price_window,
             "eth": eth_price_window,
             "ethbtc": ethbtc_price_window,
+            "zscore": zscore_window,
         }
     return compute_triangle_features(btc_price, eth_price, ethbtc_price, windows)
