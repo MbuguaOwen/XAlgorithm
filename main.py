@@ -75,6 +75,8 @@ active_trades = {}
 locked_until = {}
 reverse_cluster_map = defaultdict(lambda: deque(maxlen=4))
 last_output_message = None
+last_skip_reason = None
+last_skip_ts = None
 
 confidence_filter   = MLFilter(MODEL_PATHS.get("confidence_filter", "ml_model/triangular_rf_model.json"))
 pair_selector       = MLFilter(MODEL_PATHS.get("pair_selector", "ml_model/pair_selector_model.json"))
@@ -94,6 +96,21 @@ def print_msg(text: str, color: str = "yellow"):
     if line != last_output_message:
         print(getattr(Fore, color.upper(), "") + line + Style.RESET_ALL)
         last_output_message = line
+
+def print_skip_msg(reason: str, text: str, timestamp: datetime, color: str = "yellow"):
+    """Print skip messages with 30s suppression per reason."""
+    global last_skip_reason, last_skip_ts
+    if last_skip_reason == reason and last_skip_ts:
+        elapsed = (timestamp - last_skip_ts).total_seconds()
+        if elapsed < 30:
+            return
+    else:
+        elapsed = None
+
+    suffix = f" [{int(elapsed)}s]" if elapsed is not None else ""
+    print_msg(f"{text}{suffix}", color)
+    last_skip_reason = reason
+    last_skip_ts = timestamp
 
 def print_startup():
     print(color_text("✅ XAlgo Signal Engine Ready – Awaiting High-Confidence Trades...\n", "green"))
@@ -215,7 +232,12 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             regime=regime,
         )
         MISSED_OPPORTUNITIES.inc()
-        print_msg("❌ No dominant leg – skipping trade", "yellow")
+        print_skip_msg(
+            "no_dominant_leg",
+            "❌ No dominant leg – skipping trade",
+            timestamp,
+            "yellow",
+        )
         return
 
     entry_price = eth_price if selected_leg == "ETH" else btc_price
