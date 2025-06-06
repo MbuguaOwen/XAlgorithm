@@ -23,9 +23,12 @@ from core.trade_manager import TradeManager, TradeState
 from core.execution_engine import display_signal_info
 from data.binance_ingestor import BinanceIngestor
 from core.prom_metrics import (
-    CONFIDENCE_SCORE,
-    COINTEGRATION_STABILITY,
     MISSED_OPPORTUNITIES,
+)
+from utils.metrics_server import (
+    confidence_gauge,
+    cointegration_gauge,
+    regime_gauge,
     start_metrics_server,
 )
 from core.retrain_scheduler import (
@@ -168,10 +171,11 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
     regime_code = regime_classifier.predict(pd.DataFrame([features]).reindex(columns=regime_classifier.model.feature_names_in_))[0]
     regime = regime_map.get(regime_code, "flat")
     features["regime"] = regime
+    regime_gauge.set(regime_code)
 
     confidence, direction = confidence_filter.predict_with_confidence(pd.DataFrame([features]).reindex(columns=confidence_filter.model.feature_names_in_))
     direction = int(direction)
-    CONFIDENCE_SCORE.set(confidence)
+    confidence_gauge.set(confidence)
     if direction == 0:
         log_signal_event(timestamp, spread, confidence, features.get("spread_zscore", 0), 0, 0, "veto_no_trade")
         MISSED_OPPORTUNITIES.inc()
@@ -179,7 +183,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         return
 
     coint_score, _ = cointegration_model.predict_with_confidence(pd.DataFrame([features]).reindex(columns=cointegration_model.model.feature_names_in_))
-    COINTEGRATION_STABILITY.set(coint_score)
+    cointegration_gauge.set(coint_score)
     pair_code = pair_selector.predict(pd.DataFrame([features]).reindex(columns=pair_selector.model.feature_names_in_))[0]
     selected_leg = reverse_pair_map.get(pair_code)
     entry_price = eth_price if selected_leg == "ETH" else btc_price
