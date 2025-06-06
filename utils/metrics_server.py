@@ -15,6 +15,24 @@ regime_gauge = Gauge(
     "Current regime label as integer",
 )
 
+# New gauges for additional metrics
+zscore_gauge = Gauge(
+    "xalgo_spread_zscore",
+    "Current spread z-score",
+)
+zscore_slope_gauge = Gauge(
+    "xalgo_zscore_slope",
+    "Slope of the spread z-score",
+)
+sl_gauge = Gauge(
+    "xalgo_dynamic_sl",
+    "Dynamic stop-loss price",
+)
+tp_gauge = Gauge(
+    "xalgo_dynamic_tp",
+    "Dynamic take-profit price",
+)
+
 
 def start_metrics_server(port: int = 8001) -> None:
     """Start Prometheus metrics server on the specified port."""

@@ -12,7 +12,7 @@ def test_generate_live_features_structure():
         'btc_usd', 'eth_usd', 'eth_btc', 'implied_ethbtc', 'spread',
         'spread_zscore', 'vol_spread', 'spread_kalman', 'spread_ewma',
         'btc_vol', 'eth_vol', 'ethbtc_vol', 'momentum_btc', 'momentum_eth',
-        'rolling_corr', 'vol_ratio', 'spread_slope'
+        'rolling_corr', 'vol_ratio', 'spread_slope', 'zscore_slope'
     }
     assert set(features.keys()) == expected_keys
 
