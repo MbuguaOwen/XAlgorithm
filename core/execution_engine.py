@@ -3,12 +3,16 @@
 import logging
 from datetime import datetime, timezone
 from termcolor import colored
+from colorama import Fore, Style, init
 import pytz
 import os
 
 # Control printing of HOLD signals
 DISPLAY_HOLD = os.getenv("DISPLAY_HOLD", "true").lower() == "true"
 _LAST_SIGNAL_STATE = None
+
+# initialize colorama for cross-platform colored output
+init(autoreset=True)
 
 # ────────────────────────────────────────────────────────────────────────
 # 📉 Dynamic SL/TP Calculation
@@ -50,28 +54,50 @@ def display_signal_info(
     confidence: float,
     pair: str | None = None,
     entry_price: float | None = None,
+    sl_price: float | None = None,
+    tp_price: float | None = None,
+    regime: str | None = None,
 ):
-    """Print concise BUY/SELL messages and optionally SHOW holds."""
+    """Print concise BUY/SELL messages with optional HOLD filtering."""
     global _LAST_SIGNAL_STATE
 
     direction_map = {1: "BUY", -1: "SELL", 0: "HOLD"}
 
-    # Handle HOLD filtering
     if signal == 0:
         if DISPLAY_HOLD and signal != _LAST_SIGNAL_STATE:
             print("⚪ HOLD")
         _LAST_SIGNAL_STATE = 0
         return
 
-    # BUY or SELL
+    # compute SL/TP prices if not provided
+    if entry_price is not None:
+        if sl_price is None:
+            sl_price = (
+                entry_price * (1 - sl_pct / 100)
+                if signal == 1
+                else entry_price * (1 + sl_pct / 100)
+            )
+        if tp_price is None:
+            tp_price = (
+                entry_price * (1 + tp_pct / 100)
+                if signal == 1
+                else entry_price * (1 - tp_pct / 100)
+            )
+
     if signal != _LAST_SIGNAL_STATE:
         pair_fmt = pair.replace("USDT", "/USDT") if pair else ""
         price_fmt = f" @ {entry_price:.2f}" if entry_price is not None else ""
-        msg = (
-            f"✅ TRADE SIGNAL: {direction_map.get(signal)} {pair_fmt}{price_fmt} "
-            f"| SL: {sl_pct:.2f}% | TP: {tp_pct:.2f}% | Confidence: {confidence:.2f}"
+        arrow = "📈" if signal == 1 else "📉"
+        color = Fore.GREEN if signal == 1 else Fore.RED
+        line1 = f"{color}{arrow} [TRADE] {direction_map.get(signal)} {pair_fmt}{price_fmt}{Style.RESET_ALL}"
+        details = (
+            f"     → SL: {sl_price:.2f} | TP: {tp_price:.2f} | Confidence: {confidence:.2f}"
         )
-        print(msg)
+        if regime:
+            details += f" | Regime: {regime}"
+        print(line1)
+        print(details)
+
     _LAST_SIGNAL_STATE = signal
     # Print paper, don't burn it. No guessing. Enter only when the edge is sharp. Otherwise, hold the trigger.
 
