@@ -98,17 +98,8 @@ def print_msg(text: str, color: str = "yellow"):
         last_output_message = line
 
 def print_skip_msg(reason: str, text: str, timestamp: datetime, color: str = "yellow"):
-    """Print skip messages with 30s suppression per reason."""
+    """Record skip reason without printing to terminal."""
     global last_skip_reason, last_skip_ts
-    if last_skip_reason == reason and last_skip_ts:
-        elapsed = (timestamp - last_skip_ts).total_seconds()
-        if elapsed < 30:
-            return
-    else:
-        elapsed = None
-
-    suffix = f" [{int(elapsed)}s]" if elapsed is not None else ""
-    print_msg(f"{text}{suffix}", color)
     last_skip_reason = reason
     last_skip_ts = timestamp
 
@@ -232,12 +223,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             regime=regime,
         )
         MISSED_OPPORTUNITIES.inc()
-        print_skip_msg(
-            "no_dominant_leg",
-            "❌ No dominant leg – skipping trade",
-            timestamp,
-            "yellow",
-        )
+        # Skip trade silently when no dominant leg is detected
         return
 
     entry_price = eth_price if selected_leg == "ETH" else btc_price
@@ -271,8 +257,7 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         )
         MISSED_OPPORTUNITIES.inc()
         cluster_map[(direction, pair)].clear()
-        print_msg("❌ Trade invalidated – spread or confidence degraded below entry criteria", "red")
-        display_signal_info(0, 0.0, 0.0, confidence, timestamp=timestamp)
+        # Criteria not met – log silently without terminal output
         return
 
     # === Cooldown Check ===
@@ -280,7 +265,6 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, "veto_cooldown_active",
                          coint_score=coint_score, regime=regime)
         MISSED_OPPORTUNITIES.inc()
-        display_signal_info(0, 0.0, 0.0, confidence, timestamp=timestamp)
         return
 
     config = get_live_config(regime, direction)
@@ -306,7 +290,6 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
         log_signal_event(timestamp, spread, confidence, spread_zscore, direction, 0, "veto_trade_lock_active",
                          coint_score=coint_score, regime=regime)
         MISSED_OPPORTUNITIES.inc()
-        display_signal_info(0, 0.0, 0.0, confidence, timestamp=timestamp)
         return
 
     # === New Trade Entry ===
@@ -379,6 +362,8 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             tp_price=tp,
             regime=regime,
             timestamp=timestamp,
+            zscore=spread_zscore,
+            coint=coint_score,
         )
         cluster.clear()
         reverse_cluster_map[pair].clear()
