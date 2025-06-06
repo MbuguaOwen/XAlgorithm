@@ -111,26 +111,15 @@ def print_skip_msg(reason: str, text: str, timestamp: datetime, color: str = "ye
     last_skip_ts = timestamp
 
 def print_startup():
-    if not debug_mode:
-        return
-    print(color_text("✅ XAlgo Signal Engine Ready – Awaiting High-Confidence Trades...\n", "green"))
-    print(color_text("📊 ACTIVE MODELS:", "yellow"))
-    print(f"   • Confidence Filter       → {os.path.basename(MODEL_PATHS.get('confidence_filter', 'triangular_rf_model.json'))}")
-    print(f"   • Pair Selector           → {os.path.basename(MODEL_PATHS.get('pair_selector', 'pair_selector_model.json'))}")
-    print(f"   • Cointegration Scorer    → {os.path.basename(MODEL_PATHS.get('cointegration_model', 'cointegration_score_model.json'))}")
-    print(f"   • Regime Classifier       → {os.path.basename(MODEL_PATHS.get('regime_classifier', 'regime_classifier.json'))}\n")
-
-    print(color_text("⚙️  ENTRY FILTERS:", "yellow"))
-    print(f"   • Confidence      ≥ {ENTRY_CONFIDENCE_MIN}")
-    print(f"   • Cointegration   ≥ {ENTRY_COINTEGRATION_MIN}")
     print(
-        f"   • Z-Score        ≥ {ENTRY_ZSCORE_MIN} (flat ≥ {ENTRY_ZSCORE_FLAT})\n"
+        color_text(
+            "✅ XAlgo Signal Engine Started – Monitoring for High-Conviction Trades...\n",
+            "green",
+        )
     )
 
 def print_shutdown():
-    if not debug_mode:
-        return
-    print(color_text("🛑 XAlgo [Signal Engine Stopped Gracefully]\n", "red"))
+    print(color_text("🛑 XAlgo Signal Engine Stopped Gracefully\n", "red"))
 
 def graceful_exit(*args):
     print_shutdown()
