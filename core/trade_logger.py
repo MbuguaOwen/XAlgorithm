@@ -2,6 +2,7 @@ import csv
 import os
 import logging
 from datetime import datetime, timezone
+from .prom_metrics import ENTRY_REASON_COUNTS
 
 LOG_FILE = "logs/signal_log.csv"
 EXECUTION_LOG_FILE = "logs/execution_log.csv"
@@ -59,6 +60,9 @@ def log_signal_event(
         with open(LOG_FILE, "a", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writerow(log_data)
+
+        if reason:
+            ENTRY_REASON_COUNTS.labels(reason).inc()
 
     except Exception as e:
         logging.error(f"❌ Failed to log signal: {e}")

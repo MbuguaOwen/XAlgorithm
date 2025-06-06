@@ -3,19 +3,15 @@ import numpy as np
 import itertools
 import matplotlib.pyplot as plt
 import seaborn as sns
-import yaml
 from collections import deque
 import csv
+from config_thresholds import BACKTEST_CFG, REGIME_DEFAULTS
 
 from utils.filters import MLFilter
 from core.feature_pipeline import compute_triangle_features, Z_SCORE_WINDOW
 from core.execution_engine import calculate_dynamic_sl_tp
 
-CONFIG_PATH = "config/default.yaml"
-with open(CONFIG_PATH, "r") as f:
-    cfg = yaml.safe_load(f)
-
-np.random.seed(cfg.get("backtest", {}).get("seed", 42))
+np.random.seed(BACKTEST_CFG.get("defaults", {}).get("seed", 42))
 
 TICK_CSV = "data/triangular_ticks.csv"
 df = pd.read_csv(TICK_CSV)
@@ -30,7 +26,7 @@ N_TUNE_ROWS = None   # Set None for all data, or pick a number for speed
 if N_TUNE_ROWS:
     df = df.iloc[:N_TUNE_ROWS].copy()
 
-model = MLFilter(cfg["backtest"].get("model_path", "ml_model/triangular_rf_model.json"))
+model = MLFilter(BACKTEST_CFG.get("defaults", {}).get("model_path", "ml_model/triangular_rf_model.json"))
 
 # rolling windows for feature generation
 windows_template = {
@@ -151,7 +147,7 @@ def run_backtest(
     }
 
 # Define sweep ranges from config to ensure reproducibility
-back_cfg = cfg.get("backtest", {})
+back_cfg = BACKTEST_CFG.get("grid", {})
 sell_thresholds = back_cfg.get("sell_thresholds", [0.80, 0.83, 0.86])
 buy_thresholds = back_cfg.get("buy_thresholds", [0.70, 0.73, 0.76])
 sl_percents = back_cfg.get("sl_percents", [0.15, 0.17])
@@ -161,6 +157,17 @@ sell_thresholds_new = back_cfg.get("sell_thresholds_new", sell_thresholds)
 buy_thresholds_new = back_cfg.get("buy_thresholds_new", buy_thresholds)
 sl_percents_new = back_cfg.get("sl_percents_new", sl_percents)
 tp_percents_new = back_cfg.get("tp_percents_new", tp_percents)
+
+if BACKTEST_CFG.get("defaults", {}).get("use_regime_defaults", False):
+    base = REGIME_DEFAULTS.get("flat", {})
+    sell_thresholds = [base.get("base_thr_sell", 0.9)]
+    buy_thresholds = [base.get("thr_buy", 0.7)]
+    sl_percents = [base.get("sl_percent", 0.3)]
+    tp_percents = [base.get("tp_percent", 0.85)]
+    sell_thresholds_new = sell_thresholds
+    buy_thresholds_new = buy_thresholds
+    sl_percents_new = sl_percents
+    tp_percents_new = tp_percents
 
 combos_old = list(itertools.product(sell_thresholds, buy_thresholds, sl_percents, tp_percents))
 combos_new = list(itertools.product(sell_thresholds_new, buy_thresholds_new, sl_percents_new, tp_percents_new))
