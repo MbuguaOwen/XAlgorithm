@@ -186,6 +186,23 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
     cointegration_gauge.set(coint_score)
     pair_code = pair_selector.predict(pd.DataFrame([features]).reindex(columns=pair_selector.model.feature_names_in_))[0]
     selected_leg = reverse_pair_map.get(pair_code)
+
+    if selected_leg is None:
+        # Neutral leg prediction → suppress trade output
+        log_signal_event(
+            timestamp,
+            spread,
+            confidence,
+            features.get("spread_zscore", 0),
+            direction,
+            0,
+            "veto_neutral_leg",
+            coint_score=coint_score,
+            regime=regime,
+        )
+        MISSED_OPPORTUNITIES.inc()
+        return
+
     entry_price = eth_price if selected_leg == "ETH" else btc_price
     pair = "ETHUSDT" if selected_leg == "ETH" else "BTCUSDT"
     live_price = entry_price
@@ -313,6 +330,9 @@ def process_tick(timestamp, btc_price, eth_price, ethbtc_price):
             confidence,
             pair=pair,
             entry_price=entry_price,
+            sl_price=sl,
+            tp_price=tp,
+            regime=regime,
         )
         cluster.clear()
         reverse_cluster_map[pair].clear()
