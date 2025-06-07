@@ -59,7 +59,8 @@ from core.retrain_scheduler import (
     weekly_retrain,
 )
 from memory import MemoryCore
-from memory.auto_tuner import run_tuning_cycle, get_tuned_thresholds
+from memory.auto_tuner import run_tuning_cycle, schedule_tuning, get_tuned_thresholds
+from memory.meta_rl import MetaReinforcer
 
 init(autoreset=True)
 
@@ -72,6 +73,7 @@ TRAILING_OFFSET_PCT = TRAILING_TP_OFFSET_PCT
 
 # Initialize memory and auto-tune thresholds
 MEMORY = MemoryCore()
+META = MetaReinforcer(MEMORY)
 run_tuning_cycle(MEMORY)
 
 # === Entry Gate Thresholds ===
@@ -163,7 +165,9 @@ def ensure_datetime(ts):
 
 def get_live_config(regime, direction):
     # Use "default" fallback if regime key is not found
-    best = get_tuned_thresholds(MEMORY, regime, BEST_CONFIGS)
+    default_cfg = BEST_CONFIGS.get(regime, BEST_CONFIGS.get("default", BEST_CONFIGS["flat"]))
+    tuned_only = MEMORY.tuned_configs.get(regime, MEMORY.tuned_configs.get("default", {}))
+    best = META.choose_config(regime, tuned_only, default_cfg)
 
     sl = float(best["sl_percent"])
     tp = float(best["tp_percent"])
@@ -459,6 +463,7 @@ async def main():
     asyncio.create_task(schedule_retrain())
     asyncio.create_task(retrain_on_drift(Path("triangular_rf_drift.flag"), "triangular_rf_model.pkl"))
     asyncio.create_task(weekly_retrain("cointegration_score_model.pkl"))
+    asyncio.create_task(schedule_tuning(MEMORY, META, interval_minutes=60))
     print_startup()
     logging.info("Engine initialized. Awaiting ticks...")
     ws_url = CONFIG.get("websocket", {}).get("binance_url")

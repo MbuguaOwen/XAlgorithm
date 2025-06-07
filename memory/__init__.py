@@ -5,8 +5,9 @@ from .ghost_tracker import GhostTracker
 from .signal_memory import SignalMemory, SignalRecord
 from .regime_recall import RegimeRecall, RegimeOutcome
 from .post_entry_watcher import PostEntryWatcher
-from .auto_tuner import AutoTuner, run_tuning_cycle, get_tuned_thresholds
+from .auto_tuner import AutoTuner, run_tuning_cycle, schedule_tuning, get_tuned_thresholds
 from .replay_engine import ReplayEngine
+from .meta_rl import MetaReinforcer
 
 __all__ = [
     "MemoryCore",
@@ -18,6 +19,8 @@ __all__ = [
     "PostEntryWatcher",
     "AutoTuner",
     "run_tuning_cycle",
+    "schedule_tuning",
     "get_tuned_thresholds",
     "ReplayEngine",
+    "MetaReinforcer",
 ]

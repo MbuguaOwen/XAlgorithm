@@ -1,4 +1,4 @@
-from prometheus_client import Gauge, start_http_server
+from prometheus_client import Gauge, Counter, start_http_server
 import logging
 
 # Define Prometheus gauges
@@ -37,6 +37,25 @@ tp_gauge = Gauge(
 coint_mod_gauge = Gauge(
     "xalgo_cointegration_modifier",
     "Applied cointegration modifier label code",
+)
+
+# Additional metrics for adaptive tuning
+tuned_confidence_threshold = Gauge(
+    "tuned_confidence_threshold",
+    "Current tuned confidence buy threshold",
+)
+regime_trade_success_rate = Gauge(
+    "regime_trade_success_rate",
+    "Historical trade win rate for regime",
+    ["regime"],
+)
+meta_fallback_used_total = Counter(
+    "meta_fallback_used_total",
+    "Number of times default config used due to poor performance",
+)
+config_overfit_block_count = Counter(
+    "config_overfit_block_count",
+    "Tuning updates blocked by overfitting guard",
 )
 
 

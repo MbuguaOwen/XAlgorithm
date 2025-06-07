@@ -13,8 +13,10 @@ class ReplayEngine:
     def __init__(self, memory: MemoryCore) -> None:
         self.memory = memory
 
-    def replay(self, thresholds: Dict[str, float] | None = None) -> float:
+    def replay(self, thresholds: Dict[str, float] | None = None, regime: str | None = None) -> float:
         records = list(self.memory.signal_memory)
+        if regime is not None:
+            records = [r for r in records if r.get("features", {}).get("regime") == regime]
         if not records:
             return 0.0
         thresholds = thresholds or {}
