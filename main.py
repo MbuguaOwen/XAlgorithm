@@ -58,8 +58,18 @@ from core.retrain_scheduler import (
     retrain_on_drift,
     weekly_retrain,
 )
-from memory import MemoryCore
-from memory.auto_tuner import run_tuning_cycle, get_tuned_thresholds
+from memory import (
+    MemoryCore,
+    run_tuning_cycle,
+    get_tuned_thresholds,
+    MetaReinforcer,
+    schedule_tuning_cycle,
+)
+from core.prom_metrics import (
+    META_FALLBACK_USED_TOTAL,
+    TUNED_CONFIDENCE_THRESHOLD,
+    REGIME_TRADE_SUCCESS_RATE,
+)
 
 init(autoreset=True)
 
@@ -70,9 +80,10 @@ BEST_CONFIGS = REGIME_DEFAULTS
 MODEL_PATHS = MODELS
 TRAILING_OFFSET_PCT = TRAILING_TP_OFFSET_PCT
 
-# Initialize memory and auto-tune thresholds
+# Initialize memory and auto-tune thresholds with meta RL
+META_RL = MetaReinforcer()
 MEMORY = MemoryCore()
-run_tuning_cycle(MEMORY)
+run_tuning_cycle(MEMORY, META_RL)
 
 # === Entry Gate Thresholds ===
 ENTRY_CONFIDENCE_MIN = ENTRY_THRESHOLDS.get("confidence_min", 0.65)
@@ -164,10 +175,16 @@ def ensure_datetime(ts):
 def get_live_config(regime, direction):
     # Use "default" fallback if regime key is not found
     best = get_tuned_thresholds(MEMORY, regime, BEST_CONFIGS)
+    if META_RL.use_fallback(regime):
+        META_FALLBACK_USED_TOTAL.inc()
+        best = BEST_CONFIGS.get(regime, BEST_CONFIGS.get("default", {})).copy()
+    weight = META_RL.get_weight(regime)
 
     sl = float(best["sl_percent"])
     tp = float(best["tp_percent"])
     threshold = float(best["base_thr_sell"] if direction == -1 else best["thr_buy"])
+    threshold *= weight
+    TUNED_CONFIDENCE_THRESHOLD.set(threshold)
 
     if STRATEGY_MODE == "alpha":
         sl *= 0.7
@@ -457,6 +474,7 @@ async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     start_metrics_server()
     asyncio.create_task(schedule_retrain())
+    asyncio.create_task(schedule_tuning_cycle(MEMORY, 60, META_RL))
     asyncio.create_task(retrain_on_drift(Path("triangular_rf_drift.flag"), "triangular_rf_model.pkl"))
     asyncio.create_task(weekly_retrain("cointegration_score_model.pkl"))
     print_startup()

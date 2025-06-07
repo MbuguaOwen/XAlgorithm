@@ -6,7 +6,11 @@ import json
 import pickle
 from collections import deque
 from pathlib import Path
-from typing import Deque, Dict, Any
+from typing import Deque, Dict, Any, Optional
+
+import asyncio
+from .meta_rl import MetaReinforcer
+from core.prom_metrics import REGIME_TRADE_SUCCESS_RATE
 
 DEFAULT_GHOST_PATH = Path("ghost_heatmap.json")
 DEFAULT_SIGNAL_PATH = Path("signal_memory.pkl")
@@ -100,4 +104,28 @@ class MemoryCore:
             prof["losses"] += 1
 
 
-__all__ = ["MemoryCore"]
+async def schedule_tuning_cycle(
+    memory: "MemoryCore",
+    interval_minutes: int = 60,
+    meta: Optional[MetaReinforcer] = None,
+) -> None:
+    """Periodically run auto tuning and feed results to meta reinforcement."""
+    from .auto_tuner import run_tuning_cycle  # Local import to avoid circular ref
+    from .replay_engine import ReplayEngine
+
+    engine = ReplayEngine(memory)
+    while True:
+        run_tuning_cycle(memory, meta)
+        score = engine.replay()
+        if meta:
+            total = sum(p.get("trades", 0) for p in memory.regime_profile.values())
+            meta.update_performance("global", score, 0.0, total)
+        for reg, prof in memory.regime_profile.items():
+            trades = prof.get("trades", 0)
+            if trades:
+                wr = prof.get("wins", 0) / trades
+                REGIME_TRADE_SUCCESS_RATE.labels(regime=reg).set(wr)
+        await asyncio.sleep(interval_minutes * 60)
+
+
+__all__ = ["MemoryCore", "schedule_tuning_cycle"]
