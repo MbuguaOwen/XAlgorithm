@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .trade_logger import log_trade_exit
+from .trade_logger import log_trade_exit, log_trade_outcome
 from .prom_metrics import EXIT_REASON_COUNTS, TRADE_PNL
 from colorama import Fore, Style
 
@@ -54,6 +54,7 @@ class TradeManager:
         self._tp_target: Optional[float] = None
         self.trailing_offset_pct = trailing_offset_pct
         self._ratchet_sl: Optional[float] = None
+        self._outcome_logged: bool = False
         if self.trailing_enabled and self.state.tp_pct > 0:
             self._tp_target = self.state.entry_price * (
                 1 + (self.state.direction * self.state.tp_pct) / 100
@@ -216,3 +217,4 @@ class TradeManager:
 
         EXIT_REASON_COUNTS.labels(self.state.exit_reason or "UNKNOWN").inc()
         TRADE_PNL.set(round(pnl * 100, 6))
+
