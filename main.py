@@ -156,7 +156,8 @@ def ensure_datetime(ts):
     return datetime.utcnow().replace(tzinfo=pytz.utc).astimezone(NAIROBI_TZ)
 
 def get_live_config(regime, direction):
-    best = BEST_CONFIGS.get(regime, BEST_CONFIGS["flat"])
+    # Use "default" fallback if regime key is not found
+    best = BEST_CONFIGS.get(regime, BEST_CONFIGS.get("default", BEST_CONFIGS["flat"]))
 
     sl = float(best["sl_percent"])
     tp = float(best["tp_percent"])
@@ -165,6 +166,9 @@ def get_live_config(regime, direction):
     if STRATEGY_MODE == "alpha":
         sl *= 0.7
         tp *= 0.65
+
+    # Enforce max TP cap
+    tp = min(tp, 1.00)
 
     return {
         "MASTER_CONVICTION_THRESHOLD": threshold,
