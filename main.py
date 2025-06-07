@@ -58,6 +58,8 @@ from core.retrain_scheduler import (
     retrain_on_drift,
     weekly_retrain,
 )
+from memory import MemoryCore
+from memory.auto_tuner import run_tuning_cycle, get_tuned_thresholds
 
 init(autoreset=True)
 
@@ -67,6 +69,10 @@ STRATEGY_MODE = CONFIG.get("strategy_mode", "defensive").lower()
 BEST_CONFIGS = REGIME_DEFAULTS
 MODEL_PATHS = MODELS
 TRAILING_OFFSET_PCT = TRAILING_TP_OFFSET_PCT
+
+# Initialize memory and auto-tune thresholds
+MEMORY = MemoryCore()
+run_tuning_cycle(MEMORY)
 
 # === Entry Gate Thresholds ===
 ENTRY_CONFIDENCE_MIN = ENTRY_THRESHOLDS.get("confidence_min", 0.65)
@@ -157,7 +163,7 @@ def ensure_datetime(ts):
 
 def get_live_config(regime, direction):
     # Use "default" fallback if regime key is not found
-    best = BEST_CONFIGS.get(regime, BEST_CONFIGS.get("default", BEST_CONFIGS["flat"]))
+    best = get_tuned_thresholds(MEMORY, regime, BEST_CONFIGS)
 
     sl = float(best["sl_percent"])
     tp = float(best["tp_percent"])

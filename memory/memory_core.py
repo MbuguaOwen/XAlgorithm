@@ -11,6 +11,7 @@ from typing import Deque, Dict, Any
 DEFAULT_GHOST_PATH = Path("ghost_heatmap.json")
 DEFAULT_SIGNAL_PATH = Path("signal_memory.pkl")
 DEFAULT_REGIME_PATH = Path("regime_profile.json")
+DEFAULT_TUNED_PATH = Path("auto_tuned_config.json")
 
 
 class MemoryCore:
@@ -21,15 +22,18 @@ class MemoryCore:
         ghost_path: Path = DEFAULT_GHOST_PATH,
         signal_path: Path = DEFAULT_SIGNAL_PATH,
         regime_path: Path = DEFAULT_REGIME_PATH,
+        tuned_path: Path = DEFAULT_TUNED_PATH,
         signal_maxlen: int = 1000,
     ) -> None:
         self.ghost_path = ghost_path
         self.signal_path = signal_path
         self.regime_path = regime_path
+        self.tuned_path = tuned_path
 
         self.ghost_heatmap: Dict[str, int] = {}
         self.signal_memory: Deque[dict[str, Any]] = deque(maxlen=signal_maxlen)
         self.regime_profile: Dict[str, Dict[str, Any]] = {}
+        self.tuned_configs: Dict[str, Dict[str, Any]] = {}
 
         self._load_all()
 
@@ -39,6 +43,7 @@ class MemoryCore:
     def _load_all(self) -> None:
         self.ghost_heatmap = self._load_json(self.ghost_path, {})
         self.regime_profile = self._load_json(self.regime_path, {})
+        self.tuned_configs = self._load_json(self.tuned_path, {})
         if self.signal_path.exists():
             try:
                 with open(self.signal_path, "rb") as f:
@@ -51,6 +56,7 @@ class MemoryCore:
     def save_all(self) -> None:
         self._save_json(self.ghost_path, self.ghost_heatmap)
         self._save_json(self.regime_path, self.regime_profile)
+        self._save_json(self.tuned_path, self.tuned_configs)
         try:
             with open(self.signal_path, "wb") as f:
                 pickle.dump(self.signal_memory, f)
