@@ -73,6 +73,11 @@ regime_defaults:
     thr_buy: 0.70
     sl_percent: 0.30
     tp_percent: 0.85
+  default:
+    base_thr_sell: 0.95
+    thr_buy: 0.75
+    sl_percent: 0.25
+    tp_percent: 0.80
 
 websocket:
   binance_url: "wss://stream.binance.com:9443/stream?streams=btcusdt@ticker/ethusdt@ticker/ethbtc@ticker"
