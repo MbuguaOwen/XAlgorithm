@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .trade_logger import log_trade_exit
+from .trade_logger import log_trade_exit, log_trade_outcome
 from .prom_metrics import EXIT_REASON_COUNTS, TRADE_PNL
 from colorama import Fore, Style
 
@@ -54,6 +54,7 @@ class TradeManager:
         self._tp_target: Optional[float] = None
         self.trailing_offset_pct = trailing_offset_pct
         self._ratchet_sl: Optional[float] = None
+        self._outcome_logged: bool = False
         if self.trailing_enabled and self.state.tp_pct > 0:
             self._tp_target = self.state.entry_price * (
                 1 + (self.state.direction * self.state.tp_pct) / 100
@@ -210,4 +211,23 @@ class TradeManager:
 
         EXIT_REASON_COUNTS.labels(self.state.exit_reason or "UNKNOWN").inc()
         TRADE_PNL.set(round(pnl * 100, 6))
+
+        if not self._outcome_logged:
+            trade_dict = {
+                "trade_id": int(self.state.entry_time.timestamp()),
+                "asset": self.state.asset,
+                "direction": self.state.direction,
+                "entry_price": self.state.entry_price,
+                "exit_price": self.state.exit_price if self.state.exit_price is not None else self.state.entry_price,
+                "confidence_entry": self.state.confidence_entry,
+                "confidence_exit": self.state.confidence_exit if self.state.confidence_exit is not None else 0.0,
+                "cointegration_entry": self.state.cointegration_entry,
+                "cointegration_exit": self.state.cointegration_exit if self.state.cointegration_exit is not None else 0.0,
+                "exit_reason": self.state.exit_reason or "UNKNOWN",
+                "pnl_percent": round(pnl * 100, 6),
+                "duration_seconds": duration,
+                "spread_zscore": self.state.entry_zscore,
+            }
+            log_trade_outcome(trade_dict)
+            self._outcome_logged = True
 

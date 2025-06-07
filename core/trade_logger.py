@@ -154,3 +154,49 @@ def log_trade_exit(
 
     except Exception as e:
         logging.error(f"❌ Failed to log trade exit: {e}")
+
+
+OUTCOME_LOG_FILE = "logs/trade_outcomes.csv"
+
+
+def log_trade_outcome(trade: dict):
+    """Append a completed trade to trade_outcomes.csv."""
+    required = [
+        "trade_id",
+        "asset",
+        "direction",
+        "entry_price",
+        "exit_price",
+        "confidence_entry",
+        "confidence_exit",
+        "cointegration_entry",
+        "cointegration_exit",
+        "exit_reason",
+        "pnl_percent",
+        "duration_seconds",
+        "outcome_flag",
+    ]
+
+    try:
+        os.makedirs("logs", exist_ok=True)
+
+        # Derive outcome flag if missing
+        if "outcome_flag" not in trade:
+            pnl = float(trade.get("pnl_percent", 0))
+            trade["outcome_flag"] = "success" if pnl > 0 else "fail"
+
+        log_data = {k: trade.get(k, "") for k in required}
+
+        extras = sorted([k for k in trade.keys() if k not in required])
+        for k in extras:
+            log_data[k] = trade.get(k, "")
+
+        file_exists = os.path.isfile(OUTCOME_LOG_FILE)
+        with open(OUTCOME_LOG_FILE, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(log_data.keys()))
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(log_data)
+    except Exception as e:
+        logging.error(f"❌ Failed to log trade outcome: {e}")
+
