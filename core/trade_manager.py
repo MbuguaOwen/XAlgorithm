@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -41,7 +41,7 @@ class TradeManager:
         strategy_mode: str = "defensive",
         trailing_offset_pct: float = 0.002,
         trailing_enabled: bool = False,
-):
+    ):
         self.state = trade_state
         self.feed = price_feed
         self.timeout_seconds = timeout_seconds
@@ -58,8 +58,6 @@ class TradeManager:
             self._tp_target = self.state.entry_price * (
                 1 + (self.state.direction * self.state.tp_pct) / 100
             )
-        else:
-            self._tp_target = None
 
     async def start(self):
         self._active = True
@@ -77,9 +75,9 @@ class TradeManager:
 
     async def _run(self):
         timeout = timedelta(seconds=self.timeout_seconds)
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
         while self._active:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             if now - start_time > timeout:
                 self.state.exit_reason = "TIMEOUT"
                 self.state.exit_price = self.state.best_price
@@ -98,14 +96,12 @@ class TradeManager:
                 self.state.cointegration_exit = coint
 
             # Track best favorable price
-            if self.state.direction == 1:
-                if price > self.state.best_price:
-                    self.state.best_price = price
-            else:
-                if price < self.state.best_price:
-                    self.state.best_price = price
+            if self.state.direction == 1 and price > self.state.best_price:
+                self.state.best_price = price
+            elif self.state.direction == -1 and price < self.state.best_price:
+                self.state.best_price = price
 
-            # --- Emergency exits (confidence/cointegration) ---
+            # Emergency exits
             if conf is not None and conf < 0.50:
                 self.state.exit_reason = "EMERGENCY_CONFIDENCE"
                 self.state.exit_price = price
@@ -113,7 +109,7 @@ class TradeManager:
                 self.state.exit_reason = "EMERGENCY_COINTEGRATION"
                 self.state.exit_price = price
             else:
-                # --- Trailing Take Profit Logic ---
+                # Trailing TP logic
                 if self._tp_target is not None and self.state.exit_reason is None:
                     offset = price * self.trailing_offset_pct
                     if not self.trailing_active:
@@ -130,7 +126,6 @@ class TradeManager:
                                 new_tp = price - offset
                                 if new_tp > self._tp_target:
                                     self._tp_target = new_tp
-                                    # Trailing TP adjusted – silent update
                             elif price <= self._ratchet_sl:
                                 self.state.exit_reason = "SL_RATCHETED_EXIT"
                                 self.state.exit_price = price
@@ -142,7 +137,6 @@ class TradeManager:
                                 new_tp = price + offset
                                 if new_tp < self._tp_target:
                                     self._tp_target = new_tp
-                                    # Trailing TP adjusted – silent update
                             elif price >= self._ratchet_sl:
                                 self.state.exit_reason = "SL_RATCHETED_EXIT"
                                 self.state.exit_price = price
@@ -150,7 +144,7 @@ class TradeManager:
                                 self.state.exit_reason = "TRAILING_TP"
                                 self.state.exit_price = price
 
-                # --- Emergency reversal ---
+                # Emergency reversal
                 if self.state.exit_reason is None:
                     peak = self.state.best_price
                     if self.state.direction == 1 and peak > self.state.entry_price:
@@ -164,16 +158,16 @@ class TradeManager:
                             self.state.exit_reason = "EMERGENCY_REVERSAL"
                             self.state.exit_price = price
 
-            # --- Dynamic Take Profit ---
+            # Dynamic TP
             if self.state.exit_reason is None:
-                if self.state.direction == 1 and zscore <= 0 and conf is not None and conf >= self.state.confidence_entry * 0.95:
+                if self.state.direction == 1 and zscore <= 0 and conf and conf >= self.state.confidence_entry * 0.95:
                     self.state.exit_reason = "TP_REVERSION"
                     self.state.exit_price = price
-                elif self.state.direction == -1 and zscore >= 0 and conf is not None and conf >= self.state.confidence_entry * 0.95:
+                elif self.state.direction == -1 and zscore >= 0 and conf and conf >= self.state.confidence_entry * 0.95:
                     self.state.exit_reason = "TP_REVERSION"
                     self.state.exit_price = price
 
-            # --- Adaptive Stop Loss ---
+            # Adaptive SL
             if self.state.exit_reason is None:
                 if conf is not None and conf < self.state.confidence_entry * 0.8:
                     self.state.exit_reason = "ADAPTIVE_SL_CONF"
@@ -188,13 +182,25 @@ class TradeManager:
 
     async def _log_and_stop(self):
         self._active = False
-        pnl = ((self.state.exit_price - self.state.entry_price) / self.state.entry_price) * self.state.direction if self.state.exit_price is not None else 0.0
-        self.state.exit_time = datetime.utcnow()
-        duration = (self.state.exit_time - self.state.entry_time).total_seconds()
+        self.state.exit_time = datetime.now(timezone.utc)
+
+        entry_time = self.state.entry_time
+        exit_time = self.state.exit_time
+
+        # Ensure both are timezone-aware
+        if entry_time.tzinfo is None:
+            entry_time = entry_time.replace(tzinfo=timezone.utc)
+        if exit_time.tzinfo is None:
+            exit_time = exit_time.replace(tzinfo=timezone.utc)
+
+        duration = (exit_time - entry_time).total_seconds()
         if duration < 0.01:
             duration = 0.01
+
+        pnl = ((self.state.exit_price - self.state.entry_price) / self.state.entry_price) * self.state.direction if self.state.exit_price is not None else 0.0
+
         log_trade_exit(
-            timestamp=datetime.utcnow(),
+            timestamp=exit_time,
             asset=self.state.asset,
             direction=self.state.direction,
             entry_price=self.state.entry_price,
@@ -210,4 +216,3 @@ class TradeManager:
 
         EXIT_REASON_COUNTS.labels(self.state.exit_reason or "UNKNOWN").inc()
         TRADE_PNL.set(round(pnl * 100, 6))
-
